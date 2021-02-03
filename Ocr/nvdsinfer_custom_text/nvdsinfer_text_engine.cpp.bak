@@ -1,0 +1,67 @@
+#include "nvdsinfer_custom_impl.h"
+#include "nvdsinfer_context.h"
+#include <string.h>
+#include <iostream>
+#include <assert.h>
+#include <fstream>
+#include <sstream>
+
+#include <algorithm>
+#include <cuda_runtime_api.h>
+#include <cudnn.h>
+#include <cublas_v2.h>
+
+#include "common.h"
+
+extern "C"
+
+
+nvinfer1::ICudaEngine* loadGIEEngine(const std::string planFilePath)
+{
+    // reading the model in memory
+    std::cout << "Loading char   char  TRT Engine..." << std::endl;
+//    assert(fileExists(planFilePath));
+    std::stringstream gieModelStream;
+    gieModelStream.seekg(0, gieModelStream.beg);
+    std::ifstream cache(planFilePath);
+    assert(cache.good());
+    gieModelStream << cache.rdbuf();
+    cache.close();
+
+    // calculating model size
+    gieModelStream.seekg(0, std::ios::end);
+    const int modelSize = gieModelStream.tellg();
+    gieModelStream.seekg(0, std::ios::beg);
+    void* modelMem = malloc(modelSize);
+    gieModelStream.read((char*) modelMem, modelSize);
+	IRuntime* runtime = createInferRuntime(gLogger);
+    
+    nvinfer1::ICudaEngine* engine = runtime->deserializeCudaEngine(modelMem, modelSize, nullptr);
+    free(modelMem);
+    std::cout << "text:41 Loading @@@@@@@@@@@@@@@@@@@@@@@Complete!" << std::endl;
+    return engine;
+}
+
+bool NvDsInferCudaEngineGet(nvinfer1::IBuilder *builder,
+        NvDsInferContextInitParams *initParams,
+        nvinfer1::DataType dataType,
+        nvinfer1::ICudaEngine *& cudaEngine)
+{
+  
+	std::cout<<"come text!!!!!!!!!!!$$$$$$$$$$$$$$$$$$"<<std::endl;
+    
+
+    
+	std::string cached_path = "/home/data/installation/TensorRT-5.1.5.0/samples/sampleDense/my.trt";
+	cudaEngine = loadGIEEngine(cached_path);
+	
+    //cudaEngine = yolo.createEngine ();
+    if (cudaEngine == nullptr)
+    {
+        std::cerr << "Failed to build cuda engine on "
+                 << std::endl;
+        return false;
+    }
+
+    return true;
+}
