@@ -1,7 +1,7 @@
 ################################################################################
-# Copyright (c) 2021, positive666.  All rights reserved.
+Copyright (c) 2021, positive666.  All rights reserved.
 ################################################################################
-0.Instruction
+# 0.Instruction
 This repository includes Yolo series project implementation based on Deepstream.
 build your own Deepstream project and help you familiarize yourself with the process, you can deploy any inference model!!
 `including yolov5, yolov4, and And some model deployment projects such as OCR project based on yolo-ob detection and more  will be added later.`
@@ -10,10 +10,10 @@ you can git clone and prepare your models or test convert to trained models
 [yolov5]: (https://github.com/ultralytics/yolov5)
 [yolov4]: https://github.com/Tianxiaomo/pytorch-YOLOv4.git
 download its weights!
-## 1.Make sure your environment is configured
+# 1.Make sure your environment is configured
 `Check Nvidia graphics driver, CUDA, CUDNN, TensorRT, Deepstream`
 [NOTE] If you ensure that your environment is configured, you can start to create a project!!
-## 2.Convert the trained model file into an engine file
+# 2.Convert the trained model file into an engine file
     pip install -r requirement.txt
     you can take your models test this project:
     git clone https://github.com/positvie6666/Deepstream_Project.git
@@ -23,7 +23,7 @@ download its weights!
         1.trans_project(onnx---->trt)
         2.tensorrtx project
 	
-   # 2.0 methods_1----------trans_project(onnx---->trt):
+   ## 2.0 methods_1----------trans_project(onnx---->trt):
 	cd trans_project 
     YOLOv4 (note: torch version==1.4.0)
 	   cd yolov4_convert
@@ -67,7 +67,7 @@ download its weights!
 	   ./yolov5_trt ../config.yaml        ../images
 	               <your config file>   <your test data folder>
 	   	   
-   # 2.1 methods:tensorrtx projcet:
+   ## 2.1 methods:tensorrtx projcet:
 [reference]:https://github.com/wang-xinyu/tensorrtx
   [NOTE] if you use this project ,you should have yolov4 and yolov5 project sources models to convert modlde file,so you can use the project I prepared or use it      yourself in this reference git project.
  ` Go back to your project root directory`
@@ -93,10 +93,10 @@ download its weights!
     cp yolov5*.engine ../../engine_models/
     cp libmyplugins.so ../../engine_models/
  
-## 3.Configure your deepstream & run yolov4 and yolov5 deepstream app
+# 3.Configure your deepstream & run yolov4 and yolov5 deepstream app
 ` In any case, the above is just to get the engine file of the model you trained. If you have another way or modify the code to generate the engine file, that would be even better`
   Go back to your project root directory,Deepstream_Yolo/:
-# 3.1  run YOLO Deepstream
+## 3.1  run YOLO Deepstream
     1)compile nvdsparsebbox_Yolo.cpp ,(includes yolov4,yolov5) 
       cd nvdsinfer_custom_impl_Yolo
       cmake..
@@ -104,8 +104,8 @@ download its weights!
       cd ..
     2)configure your deepstream_app_config_yoloV<your object >.txt & onfig_infer_primary_yoloV<your object>.txt    
   such as :
-  # if your run yolov4,configure your deepstream_app_config_yoloV4.txt,  
+  ## if your run yolov4,configure your deepstream_app_config_yoloV4.txt,  
      deepstream-app -c deepstream_app_config_yoloV4.txt 
      
-  # if your use tensorrtx to generate enigne, add export .so file path,
+  ## if your use tensorrtx to generate enigne, add export .so file path,
   LD_PRELOAD=./libmyplugins.so deepstream-app -c deepstream_app_config_yoloV5.txt
