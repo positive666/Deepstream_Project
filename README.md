@@ -1,20 +1,21 @@
-
+# Introduction
 This is a highly separated deployment project based on Deepstream 5.0, including the full range of YOLO and an OCR project. The project will be updated and expanded in the future.
+You can get familiar with the plug-in development of deepstream through this project.
 Deepstream_Yolo, which contains the engineering method of yolov4 and yolov5 conversion model and the engineering method of deploying deepstream.
 Ocr, this is a text recognition deployment project based on YOLOV3 and CRNN, and it is still in the supplementary description.
 The above projects are highly separated, but you still have to make sure that your environment configuration, cuda, cudnn, Tensorrt, Deepstream are installed successfully and can be compiled and used, pay attention to your dependent environment variables, dynamic library reference paths and header file references, etc. For specific instructions, please read the README in the respective directory carefully.
-ÕâÊÇÒ»¸ö»ùÓÚDeepstream 5.0µÄ¸ß¶È·ÖÀë²¿Êğ¹¤³Ì£¬°üº¬YOLOÈ«ÏµÁĞÒÔ¼°Ò»¸öOCR¹¤³Ì£¬ºóĞø»á²¹³ä¸üĞÂºÍ²»¶ÏÀ©³ä¸ÃÏîÄ¿¡£
-Deepstream_Yolo,Õâ°üº¬ÁËyolov4 ºÍyolov5µÄ×ª»»Ä£ĞÍµÄ¹¤³Ì·½·¨ºÍ²¿ÊğdeepstreamµÄ¹¤³Ì·½·¨¡£
-Ocr£¬ÕâÊÇ»ùÓÚYOLOV3ºÍCRNNµÄÎÄ×ÖÊ¶±ğ²¿Êğ¹¤³Ì£¬»¹ÔÚ²¹³äËµÃ÷ÖĞ¡£
-ÒÔÉÏ¹¤³Ì×öÁË¸ß¶ÈµÄ·ÖÀë£¬µ«»¹ÊÇÒªÈ·±£ÄãµÄ»·¾³ÅäÖÃ,cuda,cudnn,Tensorrt,Deepstream°²×°³É¹¦ÇÒ¿É±àÒëÊ¹ÓÃ£¬×¢ÒâÄãµÄÒÀÀµ»·¾³±äÁ¿£¬¶¯Ì¬¿âµÄÒıÓÃÂ·¾¶ºÍÍ·ÎÄ¼şµÄÒıÓÃµÈ£¬¾ßÌåÊ¹ÓÃËµÃ÷£¬Çë×ĞÏ¸¿´¸÷×ÔÄ¿Â¼ÏÂµÄREADME
+
+è¿™æ˜¯ä¸€ä¸ªåŸºäºDeepstream 5.0çš„é«˜åº¦åˆ†ç¦»å·¥ç¨‹ï¼ŒåŒ…å«YOLOå…¨ç³»åˆ—ä»¥åŠä¸€ä¸ªOCRå·¥ç¨‹ï¼Œåç»­ä¼šè¡¥å……æ›´æ–°å’Œä¸æ–­æ‰©å……è¯¥é¡¹ç›®ï¼Œå¯ä»¥é€šè¿‡è¯¥é¡¹ç›®å»ç†Ÿæ‚‰deepstreamçš„æ’ä»¶åŒ–å¼€å‘ã€‚
+Deepstream_Yolo,è¿™åŒ…å«äº†yolov4 å’Œyolov5çš„è½¬æ¢æ¨¡å‹çš„å·¥ç¨‹æ–¹æ³•å’Œéƒ¨ç½²deepstreamçš„å·¥ç¨‹æ–¹æ³•ã€‚
+Ocrï¼Œè¿™æ˜¯åŸºäºYOLOV3å’ŒCRNNçš„æ–‡å­—è¯†åˆ«éƒ¨ç½²å·¥ç¨‹ï¼Œè¿˜åœ¨è¡¥å……è¯´æ˜ä¸­ã€‚
+ä»¥ä¸Šå·¥ç¨‹åšäº†é«˜åº¦çš„åˆ†ç¦»ï¼Œä½†è¿˜æ˜¯è¦ç¡®ä¿ä½ çš„ç¯å¢ƒé…ç½®,cuda,cudnn,Tensorrt,Deepstreamå®‰è£…æˆåŠŸä¸”å¯ç¼–è¯‘ä½¿ç”¨ï¼Œæ³¨æ„ä½ çš„ä¾èµ–ç¯å¢ƒå˜é‡ï¼ŒåŠ¨æ€åº“çš„å¼•ç”¨è·¯å¾„å’Œå¤´æ–‡ä»¶çš„å¼•ç”¨ç­‰ï¼Œå…·ä½“ä½¿ç”¨è¯´æ˜ï¼Œè¯·ä»”ç»†çœ‹å„è‡ªç›®å½•ä¸‹çš„README
 
 
 Will be updated and supplemented later
-ºóÃæ»áÏêÏ¸¸üĞÂ²¹³ä
+åé¢ä¼šè¯¦ç»†æ›´æ–°è¡¥å……
 
 
-Reference
-
-[yolov5]: https://github.com/ultralytics/yolov5
+# Referenceï¼š
+yolov5: https://github.com/ultralytics/yolov5
 darknet: https://github.com/AlexeyAB/darknet
 tensorrtx:https://github.com/wang-xinyu/tensorrtx
