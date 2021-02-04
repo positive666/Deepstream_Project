@@ -19,9 +19,9 @@ NOTE:If you ensure that your environment is configured, you can start to create 
      pip install -r requirement.txt
      cd Deepstream_Project
      cd Deepstream_Yolo
-## Here are the two ways,you can select yolov5s,yolov5m,yolov5l,yolov5x : 
-### 1.trans_project(onnx---->trt)
-### 2.tensorrtx project
+# Here are the two ways,you can select yolov5s,yolov5m,yolov5l,yolov5x : 
+## 1.trans_project(onnx---->trt)
+## 2.tensorrtx project
    ### 2.0 methods_1----------trans_project(onnx---->trt):
 	cd trans_project
    ### YOLOv4 (note: torch version==1.4.0)
@@ -42,7 +42,7 @@ NOTE:If you ensure that your environment is configured, you can start to create 
                             <your config file>   <your test data folder>
 
    ### YOLOV5(note: torch version==1.7.0 )
-	  cd yolov5_convert	   
+	   cd yolov5_convert	   
    ### 1)your source actvivate your python environment,input your yolov5 models into models/
    ### 2)run demo_pytorch2onnx.py to generate yolov5 onnx file:             
 	   python demo_pytorch2onnx.py --weights ./weights/yolov5x.pt  --img 640   --batch 1       
@@ -60,22 +60,22 @@ NOTE:If you ensure that your environment is configured, you can start to create 
 	   make 
 	  ./yolov5_trt ../config.yaml        ../images
 	               <your config file>   <your test data folder>	   	   
-  ## 2.1 methods:tensorrtx projcet: 
-  ### reference:https://github.com/wang-xinyu/tensorrtx
-  ### NOTE: if you use this project ,you should have yolov4 and yolov5 project sources models to convert modlde file,so you can use the project  prepared.
-  ### Go back to your project root directory
+  ## 2.1 methods:tensorrtx projcet:   
+  ### reference:https://github.com/wang-xinyu/tensorrtx  
+  ### NOTE: if you use this project ,you should have yolov4 and yolov5 project sources models to convert modlde file,so you can use the project  prepared.  
+  ### Go back to your project root directory  
   ### Yolov5 as a sample:
   ### 1)source activate your yolov5 conda env:
-       source actviate <yolov5 conda env name>
-       cd tensorrtx/yolov5
+           source actviate <yolov5 conda env name>
+           cd tensorrtx/yolov5
   ### 2)generate wts file && compile yolov5.cpp
-       python gen_wts.py  <input weights file >  <outputfile_name>                            
-       mkdir build && cd build
-       cmake ..
-       make 
+           python gen_wts.py  <input weights file >  <outputfile_name>                            
+           mkdir build && cd build
+           cmake ..
+           make 
   ### 3)run & generate yolov5x.engine and libmyplugin.so:
        [NOTE]：you should line 13 in yolov5.cpp , #define NET x  // s m l x,configure your yolov5 model 
-         ./yolov5 -x 
+          ./yolov5 -x 
                   -s
                   -l
                   -m
@@ -85,18 +85,18 @@ NOTE:If you ensure that your environment is configured, you can start to create 
           cp -r  yolov5*.engine ../../engine_models/
           cp  -r libmyplugins.so ../../engine_models/
 # 3.Configure your deepstream & run yolov4 and yolov5 deepstream app
-      In any case, the above is just to get the engine file of the model you trained. If you have another way or modify the code to generate the engine file.
-      Go back to your project root directory,Deepstream_Yolo/:
+          In any case, the above is just to get the engine file of the model you trained. If you have another way or modify the code to generate the engine file.
+          Go back to your project root directory,Deepstream_Yolo/:
 ## 3.1  run Yolo Deepstream
   ### 1)compile nvdsparsebbox_Yolo.cpp ,(includes yolov4,yolov5) 
-      cd nvdsinfer_custom_impl_Yolo
-      cmake..
-      make  
-      cd ..
+         cd nvdsinfer_custom_impl_Yolo
+         cmake..
+         make  
+         cd ..
   ### 2)configure your deepstream_app_config_yoloV<your object >.txt & onfig_infer_primary_yoloV<your object>.txt    
   ### such as :
   ## if your run yolov4,configure your deepstream_app_config_yoloV4.txt,  
-      deepstream-app -c deepstream_app_config_yoloV4.txt 
+         deepstream-app -c deepstream_app_config_yoloV4.txt 
      
   ## if your use tensorrtx to generate YoloV5 enigne, add export libmyplugins.so file path,
-      LD_PRELOAD=./libmyplugins.so deepstream-app -c deepstream_app_config_yoloV5.txt
+         LD_PRELOAD=./libmyplugins.so deepstream-app -c deepstream_app_config_yoloV5.txt
