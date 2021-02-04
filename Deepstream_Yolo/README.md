@@ -1,5 +1,7 @@
 ################################################################################
-Copyright (c) 2021, positive666.  All rights reserved.
+
+# Copyright (c) 2021, positive666.  All rights reserved.
+
 ################################################################################
 # 0.Instruction
 This repository includes Yolo series project implementation based on Deepstream.
