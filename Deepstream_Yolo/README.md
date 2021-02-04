@@ -94,7 +94,7 @@ NOTE:If you ensure that your environment is configured, you can start to create 
   ### 2)configure your deepstream_app_config_yoloV<your object >.txt & onfig_infer_primary_yoloV<your object>.txt    
   ### example:  
   ### if your run yolov4,configure your deepstream_app_config_yoloV4.txt,  
-         deepstream-app -c deepstream_app_config_yoloV4.txt 
+       deepstream-app -c deepstream_app_config_yoloV4.txt 
      
   ### if your use tensorrtx to generate YoloV5 enigne, add export libmyplugins.so file path,
-         LD_PRELOAD=./libmyplugins.so deepstream-app -c deepstream_app_config_yoloV5.txt
+       LD_PRELOAD=./libmyplugins.so deepstream-app -c deepstream_app_config_yoloV5.txt
