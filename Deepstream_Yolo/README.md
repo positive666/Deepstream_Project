@@ -5,6 +5,7 @@ Copyright (c) 2021, positive666.  All rights reserved.
 This repository includes Yolo series project implementation based on Deepstream.
 build your own Deepstream project and help you familiarize yourself with the process, you can deploy any inference model!!
 including yolov5, yolov4, and And some model deployment projects such as OCR project based on yolo-ob detection and more  will be added later.
+
 Reference:
 you can git clone and prepare your models or test convert to trained models
 [yolov5]: (https://github.com/ultralytics/yolov5)
@@ -14,9 +15,9 @@ download its weights!
 Check Nvidia graphics driver, CUDA, CUDNN, TensorRT, Deepstream`
 [NOTE] If you ensure that your environment is configured, you can start to create a project!!
 # 2.Convert the trained model file into an engine file
-    `pip install -r requirement.txt`
-    `cd Deepstream_Project`
-    `cd Deepstream_Yolo`
+     pip install -r requirement.txt
+     cd Deepstream_Project
+     cd Deepstream_Yolo
  ## Here are the two ways,you can select yolov5s,yolov5m,yolov5l,yolov5x :
         1.trans_project(onnx---->trt)
         2.tensorrtx project
