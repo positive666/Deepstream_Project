@@ -8,36 +8,32 @@ including yolov5, yolov4, and And some model deployment projects such as OCR pro
 
 Reference:
 you can git clone and prepare your models or test convert to trained models
-yolov5: (https://github.com/ultralytics/yolov5)
+
+yolov5: https://github.com/ultralytics/yolov5
 yolov4: https://github.com/Tianxiaomo/pytorch-YOLOv4.git
 download its weights!
 # 1.Make sure your environment is configured
 Check Nvidia graphics driver, CUDA, CUDNN, TensorRT, Deepstream
-[NOTE]:If you ensure that your environment is configured, you can start to create a project!!
+NOTE:If you ensure that your environment is configured, you can start to create a project!!
 # 2.Convert the trained model file into an engine file
      pip install -r requirement.txt
      cd Deepstream_Project
      cd Deepstream_Yolo
-## Here are the two ways,you can select yolov5s,yolov5m,yolov5l,yolov5x :
-        1.trans_project(onnx---->trt)
-        2.tensorrtx project
-	
+## Here are the two ways,you can select yolov5s,yolov5m,yolov5l,yolov5x : 
+### 1.trans_project(onnx---->trt)
+### 2.tensorrtx project
    ### 2.0 methods_1----------trans_project(onnx---->trt):
 	cd trans_project
    ### YOLOv4 (note: torch version==1.4.0)
         cd yolov4_convert
    ### 1)darnet models--->onnx ,(your v5 and v4 need two environments,different torch version)
        python demo_darknet2onnx.py   <cfgFile>  <weightFile>  <imageFile>  <batchSize>
-
    ### 2)pytorch models--->onnx:
-       python demo_pytorch2onnx.py  <weight_file>  <image_path>  <batch_size>  <n_classes>  <IN_IMAGE_H>  <IN_IMAGE_W>
-   
+       python demo_pytorch2onnx.py  <weight_file>  <image_path>  <batch_size>  <n_classes>  <IN_IMAGE_H>  <IN_IMAGE_W>  
    ### 3)onnx->trt,you will get model yolov4 trt file
        trtexec --onnx=<your onnx name >.onnx --explicitBatch --saveEngine=yolov4_1_3_320_512_fp16.engine --workspace=4096 --fp16
-
    ### if you can simpilfy onnx ,make sure your onnxsim and run :	   
        python -m onnxsim ./weights/yolov4.onnx  ./weights/yolov4_sim.onnx
- 
    ### if you want to compile yolov4.cpp ,generate yolov4 trt file in your build folder:
            mkdir build && cd build
 	   cmake ..
@@ -64,10 +60,10 @@ Check Nvidia graphics driver, CUDA, CUDNN, TensorRT, Deepstream
 	   make 
 	  ./yolov5_trt ../config.yaml        ../images
 	               <your config file>   <your test data folder>	   	   
-   ## 2.1 methods:tensorrtx projcet: 
-  reference:https://github.com/wang-xinyu/tensorrtx
-  [NOTE]: if you use this project ,you should have yolov4 and yolov5 project sources models to convert modlde file,so you can use the project  prepared.
-      Go back to your project root directory
+  ## 2.1 methods:tensorrtx projcet: 
+  ### reference:https://github.com/wang-xinyu/tensorrtx
+  ### NOTE: if you use this project ,you should have yolov4 and yolov5 project sources models to convert modlde file,so you can use the project  prepared.
+  ### Go back to your project root directory
   ### Yolov5 as a sample:
   ### 1)source activate your yolov5 conda env:
        source actviate <yolov5 conda env name>
@@ -91,14 +87,14 @@ Check Nvidia graphics driver, CUDA, CUDNN, TensorRT, Deepstream
 # 3.Configure your deepstream & run yolov4 and yolov5 deepstream app
       In any case, the above is just to get the engine file of the model you trained. If you have another way or modify the code to generate the engine file.
       Go back to your project root directory,Deepstream_Yolo/:
-## 3.1  run YOLO Deepstream
+## 3.1  run Yolo Deepstream
   ### 1)compile nvdsparsebbox_Yolo.cpp ,(includes yolov4,yolov5) 
       cd nvdsinfer_custom_impl_Yolo
       cmake..
       make  
       cd ..
   ### 2)configure your deepstream_app_config_yoloV<your object >.txt & onfig_infer_primary_yoloV<your object>.txt    
-  ###such as :
+  ### such as :
   ## if your run yolov4,configure your deepstream_app_config_yoloV4.txt,  
       deepstream-app -c deepstream_app_config_yoloV4.txt 
      
