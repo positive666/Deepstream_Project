@@ -12,25 +12,25 @@ yolov5: (https://github.com/ultralytics/yolov5)
 yolov4: https://github.com/Tianxiaomo/pytorch-YOLOv4.git
 download its weights!
 # 1.Make sure your environment is configured
-Check Nvidia graphics driver, CUDA, CUDNN, TensorRT, Deepstream`
-[NOTE] If you ensure that your environment is configured, you can start to create a project!!
+Check Nvidia graphics driver, CUDA, CUDNN, TensorRT, Deepstream
+[NOTE]:If you ensure that your environment is configured, you can start to create a project!!
 # 2.Convert the trained model file into an engine file
      pip install -r requirement.txt
      cd Deepstream_Project
      cd Deepstream_Yolo
-   Here are the two ways,you can select yolov5s,yolov5m,yolov5l,yolov5x :
+## Here are the two ways,you can select yolov5s,yolov5m,yolov5l,yolov5x :
         1.trans_project(onnx---->trt)
         2.tensorrtx project
 	
-   ## 2.0 methods_1----------trans_project(onnx---->trt):
+   ### 2.0 methods_1----------trans_project(onnx---->trt):
 	cd trans_project
    ### YOLOv4 (note: torch version==1.4.0)
         cd yolov4_convert
    ### 1)darnet models--->onnx ,(your v5 and v4 need two environments,different torch version)
-       python demo_darknet2onnx.py   <cfgFile> <weightFile> <imageFile> <batchSize>
+       python demo_darknet2onnx.py   <cfgFile>  <weightFile>  <imageFile>  <batchSize>
 
    ### 2)pytorch models--->onnx:
-       python demo_pytorch2onnx.py  <weight_file> <image_path> <batch_size> <n_classes> <IN_IMAGE_H> <IN_IMAGE_W>
+       python demo_pytorch2onnx.py  <weight_file>  <image_path>  <batch_size>  <n_classes>  <IN_IMAGE_H>  <IN_IMAGE_W>
    
    ### 3)onnx->trt,you will get model yolov4 trt file
        trtexec --onnx=<your onnx name >.onnx --explicitBatch --saveEngine=yolov4_1_3_320_512_fp16.engine --workspace=4096 --fp16
@@ -50,7 +50,7 @@ Check Nvidia graphics driver, CUDA, CUDNN, TensorRT, Deepstream`
    ### 1)your source actvivate your python environment,input your yolov5 models into models/
    ### 2)run demo_pytorch2onnx.py to generate yolov5 onnx file:             
 	   python demo_pytorch2onnx.py --weights ./weights/yolov5x.pt  --img 640   --batch 1       
-	                                          <your model path>   <imagsize>  <batchsize>
+	                                           <your model path>   <imagsize>  <batchsize>
    ###   or you can try this code ,run:
            python convert.py  --weights <your modle path >  --img-size<imgsize> --bata-size<default=1>
  	   
@@ -66,8 +66,8 @@ Check Nvidia graphics driver, CUDA, CUDNN, TensorRT, Deepstream`
 	               <your config file>   <your test data folder>	   	   
    ## 2.1 methods:tensorrtx projcet: 
   reference:https://github.com/wang-xinyu/tensorrtx
-  [NOTE】： if you use this project ,you should have yolov4 and yolov5 project sources models to convert modlde file,so you can use the project  prepared.
- reference git project. Go back to your project root directory
+  [NOTE]: if you use this project ,you should have yolov4 and yolov5 project sources models to convert modlde file,so you can use the project  prepared.
+      Go back to your project root directory
   ### Yolov5 as a sample:
   ### 1)source activate your yolov5 conda env:
        source actviate <yolov5 conda env name>
