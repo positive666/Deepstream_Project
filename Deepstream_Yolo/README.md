@@ -9,10 +9,8 @@ including yolov5, yolov4, and And some model deployment projects such as OCR pro
 Reference:
 you can git clone and prepare your models or test convert to trained models
 
-yolov5: https://github.com/ultralytics/yolov5
-
-yolov4: https://github.com/Tianxiaomo/pytorch-YOLOv4.git
-
+yolov5: https://github.com/ultralytics/yolov5  
+yolov4: https://github.com/Tianxiaomo/pytorch-YOLOv4.git  
 download its weights!
 # 1.Make sure your environment is configured
 Check Nvidia graphics driver, CUDA, CUDNN, TensorRT, Deepstream
