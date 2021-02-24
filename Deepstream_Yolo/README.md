@@ -73,10 +73,8 @@ NOTE:If you ensure that your environment is configured, you can start to create 
        make 
   ### 3)run & generate yolov5x.engine and libmyplugin.so:  
        [NOTE]：you should line 13 in yolov5.cpp , #define NET x  // s m l x,configure your yolov5 model  
-        ./yolov5 -x 
-                  -s
-                  -l
-                  -m
+        ./yolov5 -s 
+                  
   ### 1) test your yolov5 engine:
        sudo ./yolov5 -d  ../samples
   ### 2) mv your file 
