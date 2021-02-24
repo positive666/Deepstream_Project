@@ -29,8 +29,7 @@ NVCC:=/usr/local/cuda-$(CUDA_VER)/bin/nvcc
 
 CFLAGS:= -Wall -std=c++11 -shared -fPIC -Wno-error=deprecated-declarations
 CFLAGS+= -I../includes -I/usr/local/cuda-$(CUDA_VER)/include
-#CFLAGS+=-I../../includes -I/home/dell/Pictures/TensorRT-7.0.0.11/include
-#CFLAGS+=-I../../includes -I/opt/nvidia/deepstream/deepstream-5.0/sources/includes
+
 LIBS:= -L/usr/local/cuda-10.2/lib64 -L/usr/lib/x86_64-linux-gnu -L/opt/nvidia/deepstream/deepstream-5.0/lib/ -lnvinfer_plugin -lnvinfer -lnvparsers -L/usr/local/cuda-$(CUDA_VER)/lib64 -lcudart -lcublas -lstdc++fs 
 LFLAGS:= -shared -Wl,--start-group $(LIBS) -Wl,--end-group
 

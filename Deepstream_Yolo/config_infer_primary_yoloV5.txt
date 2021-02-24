@@ -64,18 +64,19 @@ net-scale-factor=0.0039215697906911373
 model-color-format=0
 #custom-network-config=yolov3.cfg
 #model-file=yolov3.weights
-model-engine-file=/home/data/code/Deepstream_Project/yolov5x.engine
+model-engine-file=./yolov5X.engine
 labelfile-path=labels.txt
-int8-calib-file=yolov3-calibration.table.trt7.0
+#int8-calib-file=yolov3-calibration.table.trt7.0
 ## 0=FP32, 1=INT8, 2=FP16 mode
 network-mode=1
 num-detected-classes=80
 gie-unique-id=1
 network-type=0
-is-classifier=0
+#is-classifier=0
+output-blob-names=prob
 ## 0=Group Rectangles, 1=DBSCAN, 2=NMS, 3= DBSCAN+NMS Hybrid, 4 = None(No clustering)
-#cluster-mode=2
-maintain-aspect-ratio=1
+cluster-mode=4
+maintain-aspect-ratio=0
 parse-bbox-func-name=NvDsInferParseCustomYoloV5
 custom-lib-path=nvdsinfer_custom_impl_Yolo/libnvdsinfer_custom_impl_Yolo.so
 engine-create-func-name=NvDsInferYoloCudaEngineGet
@@ -83,5 +84,6 @@ engine-create-func-name=NvDsInferYoloCudaEngineGet
 #scaling-compute-hw=0
 
 [class-attrs-all]
-nms-iou-threshold=0.3
-threshold=0.7
+pre-cluster-threshold=0.25
+nms-iou-threshold=0.45
+#threshold=0.7

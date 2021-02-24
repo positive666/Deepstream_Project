@@ -23,7 +23,7 @@
 [application]
 enable-perf-measurement=1
 perf-measurement-interval-sec=5
-#gie-kitti-output-dir=streamscl
+gie-kitti-output-dir=streamscl
 
 [tiled-display]
 enable=0
@@ -54,14 +54,27 @@ cudadec-memtype=0
 [sink0]
 enable==1
 #Type - 1=FakeSink 2=EglSink 3=File
-type=2
+type=3
 sync=0
 source-id=0
 gpu-id=0
 container=1
 codec=1
 nvbuf-memory-type=0
-output-file=yolov55.mp4
+#output-file=yolov55.mp4
+
+[sink1]
+enable=1
+type=3
+#1=mp4 2=mkv
+container=1
+#1=h264 2=h265
+codec=1
+sync=0
+#iframeinterval=10
+bitrate=2000000
+output-file=yolov5_out.mp4
+source-id=0
 
 [osd]
 enable=1
@@ -87,8 +100,8 @@ batch-size=1
 ##to push the batch even if the complete batch is not formed
 batched-push-timeout=40000
 ## Set muxer output width and height
-width=1920
-height=1080
+width=1080
+height=720
 ##Enable to maintain aspect ratio wrt source, and allow black borders, works
 ##along with width, height properties
 enable-padding=0
@@ -100,10 +113,10 @@ nvbuf-memory-type=0
 [primary-gie]
 enable=1
 gpu-id=0
-#生成的引擎模型文件路径/engine 
-model-engine-file=yolov5x.engine
-#分类数据/classisfer label txt
-labelfile-path=labels.txt
+#engine 
+#model-engine-file=yolov5.engine
+#/classisfer label txt
+#labelfile-path=labels.txt
 batch-size=1
 #Required by the app for OSD, not a plugin property
 bbox-border-color0=1;0;0;1
@@ -114,15 +127,10 @@ bbox-border-color3=0;1;0;1
 interval=0
 gie-unique-id=1
 nvbuf-memory-type=0
-#主推理配置模型文件名/primary modle config file 
+#/primary modle config file 
 config-file=config_infer_primary_yoloV5.txt
 
-#跟踪器/KLT-tracker config
-[tracker]
-enable=0
-tracker-width=512
-tracker-height=320
-ll-lib-file=/opt/nvidia/deepstream/deepstream-5.0/lib/libnvds_mot_klt.so  
+
 
 [tests]
 file-loop=0
