@@ -4,8 +4,8 @@
 .Instruction
 CenterFace Deepstream project
 
-## make sure your onnx and trt ,inpur dim 480*640 or 640*640
-#my input 480*640 ->output 160*120
+## make sure your onnx and trt ,inpur dim 480x640  or 640x480
+#my input 480x640 ->output 160x120
 ## 1.onnx->trt
 cd Centerface 
 wget https://github.com/Star-Clouds/CenterFace/raw/master/models/onnx/centerface.onnx
