@@ -4,9 +4,9 @@
 .Instruction
 CenterFace Deepstream project
 
-# make sure your onnx and trt ,inpur dim 480*640 or 640*640
+## make sure your onnx and trt ,inpur dim 480*640 or 640*640
 #my input 480*640 ->output 160*120
-# 1.onnx->trt
+## 1.onnx->trt
 cd Centerface 
 wget https://github.com/Star-Clouds/CenterFace/raw/master/models/onnx/centerface.onnx
 python   export_onnx.py
@@ -17,7 +17,7 @@ make
 ./CenterFace_trt ../config.yaml ../samples
 mv centerface.trt ../
 
-# 2.run deepstream_CenterFace
+## 2.run deepstream_CenterFace
 cd nvdsinfer_custom_impl_CenterFace/
 make 
 cd ..
