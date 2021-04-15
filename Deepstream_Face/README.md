@@ -2,6 +2,8 @@
 # Copyright (c) 2021, positive666.  All rights reserved.
 ################################################################################
 .Instruction
+CSDN  https://blog.csdn.net/weixin_44119362/article/details/115705911 
+
 CenterFace Deepstream project
 
 ## make sure your onnx and trt ,inpur dim 480x640  or 640x480
