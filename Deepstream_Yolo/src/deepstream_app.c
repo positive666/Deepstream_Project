@@ -25,9 +25,13 @@
 #include <math.h>
 #include <stdlib.h>
 #include <time.h>
-// #include <curl.h>
+//#include<iostream>
 // #include <json-glib.h>
-
+#include <glib-object.h>
+#include <json-glib/json-glib.h>
+#include "cJSON.h"
+#include "rdkafka.h"
+#include<signal.h>
 #include "deepstream_app.h"
 
 #define MAX_DISPLAY_LEN 64
@@ -220,43 +224,43 @@ bus_callback (GstBus * bus, GstMessage * message, gpointer data)
  * property "gie-kitti-output-dir" must be set in configuration file.
  * Data of different sources and frames is dumped in separate file.
  */
-// static void
-// write_kitti_output (AppCtx * appCtx, NvDsBatchMeta * batch_meta)
-// {
-//   gchar bbox_file[1024] = { 0 };
-//   FILE *bbox_params_dump_file = NULL;
+static void
+ write_kitti_output (AppCtx * appCtx, NvDsBatchMeta * batch_meta)
+ {
+   gchar bbox_file[1024] = { 0 };
+   FILE *bbox_params_dump_file = NULL;
 
-//   if (!appCtx->config.bbox_dir_path)
-//     return;
+   if (!appCtx->config.bbox_dir_path)
+    return;
 
-//   for (NvDsMetaList * l_frame = batch_meta->frame_meta_list; l_frame != NULL;
-//       l_frame = l_frame->next) {
-//     NvDsFrameMeta *frame_meta = l_frame->data;
-//     guint stream_id = frame_meta->pad_index;
-//     g_snprintf (bbox_file, sizeof (bbox_file) - 1,
-//         "%s/%02u_%03u_%06lu.txt", appCtx->config.bbox_dir_path,
-//         appCtx->index, stream_id, (gulong) frame_meta->frame_num);
-//     bbox_params_dump_file = fopen (bbox_file, "w");
-//     if (!bbox_params_dump_file)
-//       continue;
+  for (NvDsMetaList * l_frame = batch_meta->frame_meta_list; l_frame != NULL;
+       l_frame = l_frame->next) {
+     NvDsFrameMeta *frame_meta = l_frame->data;
+	  guint stream_id = frame_meta->pad_index;
+    g_snprintf (bbox_file, sizeof (bbox_file) - 1,
+        "%s/%02u_%03u_%06lu.txt", appCtx->config.bbox_dir_path,
+        appCtx->index, stream_id, (gulong) frame_meta->frame_num);
+          bbox_params_dump_file = fopen (bbox_file, "w");
+    if (!bbox_params_dump_file)
+      continue;
 
-//     for (NvDsMetaList * l_obj = frame_meta->obj_meta_list; l_obj != NULL;
-//         l_obj = l_obj->next) {
-//       NvDsObjectMeta *obj = (NvDsObjectMeta *) l_obj->data;
-//       float left = obj->rect_params.left;
-//       float top = obj->rect_params.top;
-//       float right = left + obj->rect_params.width;
-//       float bottom = top + obj->rect_params.height;
-//       // Here confidence stores detection confidence, since dump gie output
-//       // is before tracker plugin
-//       float confidence = obj->confidence;
-//       fprintf (bbox_params_dump_file,
-//           "%s 0.0 0 0.0 %f %f %f %f 0.0 0.0 0.0 0.0 0.0 0.0 0.0 %f\n",
-//           obj->obj_label, left, top, right, bottom, confidence);
-//     }
-//     fclose (bbox_params_dump_file);
-//   }
-// }
+    for (NvDsMetaList * l_obj = frame_meta->obj_meta_list; l_obj != NULL;
+         l_obj = l_obj->next) {
+      NvDsObjectMeta *obj = (NvDsObjectMeta *) l_obj->data;
+      float left = obj->rect_params.left;
+      float top = obj->rect_params.top;
+       float right = left + obj->rect_params.width;
+       float bottom = top + obj->rect_params.height;
+	     float confidence = obj->confidence;
+       // Here confidence stores detection confidence, since dump gie output
+      // is before tracker plugin
+      fprintf (bbox_params_dump_file,
+           "%s 0.0 0 0.0 %f %f %f %f 0.0 0.0 0.0 0.0 0.0 0.0 0.0 %f\n",
+         obj->obj_label, left, top, right, bottom, confidence);
+    }
+     fclose (bbox_params_dump_file);
+   }
+ }
 
 // static void curl_postjson(gchar label, float left, float top, float right, float bottom, float confidence, GstClockTime relativeTime, char* localTime, float areaProportion)
 // {
@@ -326,30 +330,88 @@ bus_callback (GstBus * bus, GstMessage * message, gpointer data)
 // 	return 0;
 // }
 
+static int run = 1;
+
+static void stop(int sig){
+	run = 0;
+	fclose(stdin);
+}
+
+/*
+    每条消息调用一次该回调函数，说明消息是传递成功(rkmessage->err == RD_KAFKA_RESP_ERR_NO_ERROR)
+    还是传递失败(rkmessage->err != RD_KAFKA_RESP_ERR_NO_ERROR)
+    该回调函数由rd_kafka_poll()触发，在应用程序的线程上执行
+ */
+static void dr_msg_cb(rd_kafka_t *rk,
+					  const rd_kafka_message_t *rkmessage, void *opaque){
+		if(rkmessage->err)
+			fprintf(stderr, "%% Message delivery failed: %s\n", 
+					rd_kafka_err2str(rkmessage->err));
+		else
+			fprintf(stderr,
+                        "%% Message delivered (%zd bytes, "
+                        "partition %"PRId32")\n",
+                        rkmessage->len, rkmessage->partition); 
+       // rkmessage被librdkafka自动销毁
+	   
+}
+
+
 static void
-write_kitti_output (AppCtx * appCtx, NvDsBatchMeta * batch_meta, GstBuffer *buffer)
+kafka_kitti_output (AppCtx * appCtx, NvDsBatchMeta * batch_meta, GstBuffer *buffer)
 {
-  gchar bbox_file[1024] = { 0 };
-  FILE *bbox_params_dump_file = NULL;
+  /* if (!appCtx->config.bbox_dir_path)
+    return; */
+  /*   rd_kafka_t *rk;            
+	rd_kafka_topic_t *rkt;    
+	rd_kafka_conf_t *conf;    
+	char errstr[512];          
+		//char buf[512];             
+	const char *brokers;       
+	const char *topic;         
+	brokers = "localhost:9092";
+	topic = "ads-test-deepstream";
+       
+		//创建一个kafka配置占位
+	conf = rd_kafka_conf_new();
 
-  if (!appCtx->config.bbox_dir_path)
-    return;
 
-  for (NvDsMetaList * l_frame = batch_meta->frame_meta_list; l_frame != NULL;
+	if (rd_kafka_conf_set(conf, "bootstrap.servers", brokers, errstr,
+					sizeof(errstr)) != RD_KAFKA_CONF_OK){
+			fprintf(stderr, "%s\n", errstr);
+			//return 1;
+	}
+
+		rd_kafka_conf_set_dr_msg_cb(conf, dr_msg_cb);
+
+	rk = rd_kafka_new(RD_KAFKA_PRODUCER, conf, errstr, sizeof(errstr));
+	if(!rk){
+			fprintf(stderr, "%% Failed to create new producer:%s\n", errstr);
+			//return 1;
+		}
+
+		
+	rkt = rd_kafka_topic_new(rk, topic, NULL);
+    if (!rkt){
+			fprintf(stderr, "%% Failed to create topic object: %s\n", 
+					rd_kafka_err2str(rd_kafka_last_error()));
+			rd_kafka_destroy(rk);
+			//return 1;
+		} */
+	
+	signal(SIGINT, stop);
+ 
+       
+    cJSON *root = cJSON_CreateArray();
+
+    int count=0;
+  
+   for (NvDsMetaList * l_frame = batch_meta->frame_meta_list; l_frame != NULL;
       l_frame = l_frame->next) {
-    NvDsFrameMeta *frame_meta = l_frame->data;
-    // if (first_frame_time == 0){
-    //   first_frame_time = frame_meta->ntp_timestamp;
-    // }
-    guint stream_id = frame_meta->pad_index;
-    g_snprintf (bbox_file, sizeof (bbox_file) - 1,
-        "%s/%02u_%03u_%06lu.txt", appCtx->config.bbox_dir_path,
-        appCtx->index, stream_id, (gulong) frame_meta->frame_num);
-    bbox_params_dump_file = fopen (bbox_file, "w");
-    if (!bbox_params_dump_file)
-      continue;
-
-    for (NvDsMetaList * l_obj = frame_meta->obj_meta_list; l_obj != NULL;
+		  count++;
+     NvDsFrameMeta *frame_meta = l_frame->data;	
+	 
+    for (NvDsMetaList * l_obj = frame_meta->obj_meta_list; l_obj != NULL;  //遍历所有BOX
         l_obj = l_obj->next) {
       NvDsObjectMeta *obj = (NvDsObjectMeta *) l_obj->data;
       float left = obj->rect_params.left;
@@ -359,38 +421,126 @@ write_kitti_output (AppCtx * appCtx, NvDsBatchMeta * batch_meta, GstBuffer *buff
       // Here confidence stores detection confidence, since dump gie output
       // is before tracker plugin
       float confidence = obj->confidence;
-
-      time_t utcCalc = frame_meta->ntp_timestamp - 2208988800UL ;
+       
+	    //bbox_params_dump_file = fopen (bbox_file, "w");
+	   
+      //time_t utcCalc = frame_meta->ntp_timestamp - 2208988800UL ;
+	  time_t utcCalc ;
       struct tm * timeinfo;
       time ( &utcCalc );
-      timeinfo = localtime ( &utcCalc );
-      // Serial.print( day(utcCalc )) ;
-      // Serial.print( monthutcCalc )) ;
-      // Serial.print( year(utcCalc ) );
+      timeinfo= gmtime(&utcCalc );
+	  timeinfo->tm_hour+=8;
+	  char result[50];
+	  size_t dstSize = strftime(result, 50, "%Y-%m-%d %T", timeinfo);
+
       guint frameHeight = frame_meta -> source_frame_height;
       guint frameWidth = frame_meta -> source_frame_width;
       // printf("frame height is %d", frameHeight);
-      // printf("frame weight is %d", frameWidth);
 
-
-      float areaProportion = (obj->rect_params.width * obj->rect_params.height)/(frameHeight*frameWidth);
-      // curl_postjson(obj->obj_label, left, top, right, bottom, confidence, buffer->pts/G_GINT64_CONSTANT (1000000), asctime (timeinfo), areaProportion);
-      fprintf (bbox_params_dump_file,
-          // "%s 0.0 0 0.0 %f %f %f %f 0.0 0.0 0.0 0.0 0.0 0.0 0.0 %f\n",
-          "Object: %s Bounding Box %f %f %f %f Confidence: %f Time: %ld Local Time: %s Ads proportion: %f\n",
-
-          // obj->obj_label, left, top, right, bottom, confidence, frame_meta->ntp_timestamp - first_frame_time);
-          // obj->obj_label, left, top, right, bottom, confidence, buffer->pts/G_GINT64_CONSTANT (1000000),frame_meta->ntp_timestamp);
-          obj->obj_label, left, top, right, bottom, confidence, buffer->pts/G_GINT64_CONSTANT (1000000), asctime (timeinfo), areaProportion);
-
-
+      //添加数组
+	    
+		char a[20],b[20],c[20],d[20];
+		sprintf(a,"%.0f",left);//
+		sprintf(b,"%.0f",top);
+		sprintf(c,"%.0f",obj->rect_params.width);
+		sprintf(d,"%.0f",obj->rect_params.height);
+		cJSON *json = cJSON_CreateObject();
+		cJSON *array = NULL;
+		cJSON *array_2 = NULL;
+		cJSON *array_3 = NULL;
+		 
+		cJSON_AddItemToObject(json, "Box", array_2=cJSON_CreateObject());
+		cJSON_AddStringToObject(array_2,"leftTopx",a);
+		cJSON_AddStringToObject(array_2,"leftTopy",b);
+		cJSON_AddStringToObject(array_2,"width",c);
+		cJSON_AddStringToObject(array_2,"height",d);
+		// cJSON_AddItemToObject(json,"Event-Time",array=cJSON_CreateArray());
+		cJSON_AddStringToObject(json,"eventTime",result);
+		cJSON_AddStringToObject(json,"type","广告");
+		cJSON_AddStringToObject(json,"objectId",(obj->obj_label));
+		cJSON_AddItemToArray(root,json); 
+	
+     }		
     }
-    fclose (bbox_params_dump_file);
-  }
+	
+	
+	/* char *json_data = NULL;
+		printf("data:%s\n",json_data = cJSON_Print(root));
+		free(json_data); */
+	char *buf = cJSON_PrintUnformatted(root);
+	//memcpy(buf,send,count);
+	rd_kafka_resp_err_t err;
+	
+    size_t len = strlen(buf); 
+     
+	//cJSON_free(send);
+     	//printf("len:%s\n",len);
+     	if(buf[len-1] == '\n')
+     		buf[--len] = '\0';
+
+     	if(len == 0){
+            /*轮询用于事件的kafka handle，
+            事件将导致应用程序提供的回调函数被调用
+            第二个参数是最大阻塞时间，如果设为0，将会是非阻塞的调用*/
+			
+     		rd_kafka_poll(appCtx->rk, 1);
+     		
+     	}
+
+    //retry:  
+	         if (rd_kafka_produce(  
+                    /* Topic object */  
+                    appCtx->rkt,  
+                    /*使用内置的分区来选择分区*/  
+                    RD_KAFKA_PARTITION_UA,  
+                    /*生成payload的副本*/  
+                    RD_KAFKA_MSG_F_COPY,  
+                    /*消息体和长度*/  
+                    buf, len,  
+                    /*可选键及其长度*/  
+                    NULL, 0,  
+                    NULL) == -1){  
+            fprintf(stderr,   
+                "%% Failed to produce to topic %s: %s\n",   
+                rd_kafka_topic_name(appCtx->rkt),  
+                rd_kafka_err2str(rd_kafka_last_error()));  
+  
+            if (rd_kafka_last_error() == RD_KAFKA_RESP_ERR__QUEUE_FULL){  
+                /*如果内部队列满，等待消息传输完成并retry, 
+                内部队列表示要发送的消息和已发送或失败的消息， 
+                内部队列受限于queue.buffering.max.messages配置项*/  
+                rd_kafka_poll(appCtx->rk, 100);  
+                //goto retry;  
+            }     
+        }
+		/* else{  
+            fprintf(stderr, "%% Enqueued message (%zd bytes) for topic %s\n",   
+                len, rd_kafka_topic_name(rkt));  
+        }   */
+  
+        /*producer应用程序应不断地通过以频繁的间隔调用rd_kafka_poll()来为 
+        传送报告队列提供服务。在没有生成消息以确定先前生成的消息已发送了其 
+        发送报告回调函数(和其他注册过的回调函数)期间，要确保rd_kafka_poll() 
+        仍然被调用*/  
+    rd_kafka_poll(appCtx->rk, 0);  
+	  
+	 
+     	
+   // fprintf(stderr, "%% Flushing final message.. \n");  
+     /*rd_kafka_flush是rd_kafka_poll()的抽象化， 
+     等待所有未完成的produce请求完成，通常在销毁producer实例前完成 
+     以确保所有排列中和正在传输的produce请求在销毁前完成*/  
+    rd_kafka_flush(appCtx->rk, 1);
+  
+     /* Destroy topic object */  
+    /* rd_kafka_topic_destroy(rkt);  
+    
+     /* Destroy the producer instance */  
+    //rd_kafka_destroy(rk);   
+	free(buf);
+    cJSON_Delete(root);
+  
 }
-
-
-
 
 /**
  * Function to dump past frame objs in kitti format.
@@ -675,7 +825,7 @@ gie_primary_processing_done_buf_prob (GstPad * pad, GstPadProbeInfo * info,
   }
 
   // write_kitti_output (appCtx, batch_meta);
-  write_kitti_output (appCtx, batch_meta, buf);
+  kafka_kitti_output(appCtx, batch_meta, buf);
 
   return GST_PAD_PROBE_OK;
 }
@@ -692,9 +842,12 @@ gie_processing_done_buf_prob (GstPad * pad, GstPadProbeInfo * info,
   NvDsInstanceBin *bin = (NvDsInstanceBin *) u_data;
   guint index = bin->index;
   AppCtx *appCtx = bin->appCtx;
-
+  
+  //g_print("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n");
+  
   if (gst_buffer_is_writable (buf))
     process_buffer (buf, appCtx, index);
+  //g_print("yyy2222222222222222222222222222222222222\n");
   return GST_PAD_PROBE_OK;
 }
 

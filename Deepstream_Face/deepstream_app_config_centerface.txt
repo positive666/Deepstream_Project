@@ -1,14 +1,14 @@
 [application]
 enable-perf-measurement=1
 perf-measurement-interval-sec=5
-gie-kitti-output-dir=./save
+#gie-kitti-output-dir=./savelog
 
 [tiled-display]
 enable=1
 rows=1
 columns=1
-width=1280
-height=720
+width=1920
+height=1080
 gpu-id=0
 #(0): nvbuf-mem-default - Default memory allocated, specific to particular platform
 #(1): nvbuf-mem-cuda-pinned - Allocate Pinned/Host cuda memory applicable for Tesla
@@ -22,8 +22,11 @@ enable=1
 #Type - 1=CameraV4L2 2=URI 3=MultiURI
 type=2
 num-sources=1
-uri=file://./Redaction-A_1.mp4
+#uri=file://1.mp4
+uri=file://../../img_face.mp4
+#drop-frame-interval=5
 cudadec-memtype=0
+gpu-id=0
 
 [sink0]
 enable=1
@@ -34,9 +37,60 @@ container=1
 codec=1
 sync=0
 iframeinterval=10
-bitrate=2000000
-output-file=./out.mp4
+bitrate=4000000
+output-file=./out824.mp4
+#rtsp-port=8554
 source-id=0
+
+
+[sink1]
+enable=0
+#Type - 1=FakeSink 2=EglSink 3=File 4=UDPSink 5=nvoverlaysink 6=MsgConvBroker
+type=6
+msg-conv-config=dstest5_msgconv_sample_config.txt
+#(0): PAYLOAD_DEEPSTREAM - Deepstream schema payload
+#(1): PAYLOAD_DEEPSTREAM_MINIMAL - Deepstream schema payload minimal
+#(256): PAYLOAD_RESERVED - Reserved type
+#(257): PAYLOAD_CUSTOM   - Custom schema payload
+msg-conv-payload-type=0
+msg-broker-proto-lib=/opt/nvidia/deepstream/deepstream-5.1/lib/libnvds_kafka_proto.so 
+#Provide your msg-broker-conn-str here
+msg-broker-conn-str=localhost;9092;quickstart-events
+topic=quickstart-events
+#Optional:
+#msg-broker-config=../../deepstream-test4/cfg_kafka.txt
+
+
+
+
+[message-converter]
+enable=0
+msg-conv-config=dstest5_msgconv_sample_config.txt
+#(0): PAYLOAD_DEEPSTREAM - Deepstream schema payload
+#(1): PAYLOAD_DEEPSTREAM_MINIMAL - Deepstream schema payload minimal
+#(256): PAYLOAD_RESERVED - Reserved type
+#(257): PAYLOAD_CUSTOM   - Custom schema payload
+msg-conv-payload-type=0
+# Name of library having custom implementation.
+#msg-conv-msg2p-lib=<val>
+# Id of component in case only selected message to parse.
+#msg-conv-comp-id=<val>
+
+# Configure this group to enable cloud message consumer.
+[message-consumer0]
+enable=0
+proto-lib=/opt/nvidia/deepstream/deepstream-5.1/lib/libnvds_kafka_proto.so
+conn-str=localhost;9092
+#config-file=<broker config file e.g. cfg_kafka.txt>
+subscribe-topic-list=quickstart-events
+#subscribe-topic-list=<topic1>;<topic2>;<topicN>
+# Use this option if message has sensor name as id instead of index (0,1,2 etc.).
+sensor-list-file=dstest5_msgconv_sample_config.txt
+
+
+
+
+
 
 
 [osd]
@@ -48,8 +102,8 @@ text-color=1;1;1;1;
 text-bg-color=0.3;0.3;0.3;1
 font=Serif
 show-clock=0
-clock-x-offset=100
-clock-y-offset=120
+clock-x-offset=800
+clock-y-offset=820
 clock-text-size=12
 clock-color=1;0;0;0
 nvbuf-memory-type=0
@@ -82,6 +136,16 @@ gpu-id=0
 gie-unique-id=1
 nvbuf-memory-type=0
 config-file=centerface.txt
+
+[secondary-gie] 
+enable=1
+config-file=arcface.txt
+gpu-id=0
+batch-size=1
+gie-unique-id=2
+operate-on-gie-id=1
+nvbuf-memory-type=0
+
 
 [tests]
 file-loop=0

@@ -1,0 +1,18 @@
+{
+    "input_camera": "./1.mp4",
+    "input_takeCrop": false,
+    "input_embeddingsFile": "./save.json",
+    "input_numImagesFile": "./a.txt",
+    "det_threshold_nms": 0.4,
+    "det_threshold_bbox": 0.6,
+    "det_maxFacesPerScene": 5,
+    "rec_inputShape": [3, 112, 112],
+    "rec_outputDim": 512,
+    "rec_knownPersonThreshold": 0.65,
+    "out_visualize": true,
+    "gen_imgSource": "",
+    "gen_imgIsCropped": true,
+    "send_request": false
+ 
+    
+}

@@ -7,7 +7,9 @@ wget https://developer.nvidia.com/blog/wp-content/uploads/2020/02/Redaction-A_1.
 cd nvdsinfer_custom_impl_CenterFace/
 make 
 cd ..
+cd src
+make 
 
-deepstream-app -c deepstream_app_config_centerface.txt
+./src/face  -c deepstream_app_config_centerface.txt
 
 

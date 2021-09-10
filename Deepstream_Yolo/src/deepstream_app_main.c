@@ -28,20 +28,29 @@
 #include <termios.h>
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
-
+//#include "analy.h"
 #define MAX_INSTANCES 128
 #define APP_TITLE "DeepStream"
-
+#include "rdkafka.h"
 #define DEFAULT_X_WINDOW_WIDTH 1920
 #define DEFAULT_X_WINDOW_HEIGHT 1080
+
+typedef enum
+{
+    APP_CONFIG_ANALYTICS_MODELS_UNKNOWN = 0,
+    APP_CONFIG_ANALYTICS_RESNET_PGIE_3SGIE_TYPE_COLOR_MAKE = 1,
+} AppConfigAnalyticsModel;
 
 AppCtx *appCtx[MAX_INSTANCES];
 static guint cintr = FALSE;
 static GMainLoop *main_loop = NULL;
 static gchar **cfg_files = NULL;
 static gchar **input_files = NULL;
+static gchar **override_cfg_file = NULL;
 static gboolean print_version = FALSE;
-static gboolean show_bbox_text = FALSE;
+static gboolean playback_utc = TRUE;
+static gboolean show_bbox_text = TRUE;
+static gboolean force_tcp = TRUE;
 static gboolean print_dependencies_version = FALSE;
 static gboolean quit = FALSE;
 static gint return_value = 0;
@@ -59,28 +68,57 @@ static GMutex disp_lock;
 
 static guint rrow, rcol, rcfg;
 static gboolean rrowsel = FALSE, selecting = FALSE;
+static AppConfigAnalyticsModel model_used = APP_CONFIG_ANALYTICS_MODELS_UNKNOWN;
 
 
+
+#define PERSON_ID 0
+
+#ifdef EN_DEBUG
+#define LOGD(...) printf(__VA_ARGS__)
+#else
+#define LOGD(...)
+#endif
+
+//static TestAppCtx *testAppCtx;
 GST_DEBUG_CATEGORY (NVDS_APP);
 
+
+
+/** @} imported from deepstream-app as is */
 GOptionEntry entries[] = {
-  {"version", 'v', 0, G_OPTION_ARG_NONE, &print_version,
-      "Print DeepStreamSDK version", NULL}
-  ,
-  {"tiledtext", 't', 0, G_OPTION_ARG_NONE, &show_bbox_text,
-      "Display Bounding box labels in tiled mode", NULL}
-  ,
-  {"version-all", 0, 0, G_OPTION_ARG_NONE, &print_dependencies_version,
-      "Print DeepStreamSDK and dependencies version", NULL}
-  ,
-  {"cfg-file", 'c', 0, G_OPTION_ARG_FILENAME_ARRAY, &cfg_files,
-      "Set the config file", NULL}
-  ,
-  {"input-file", 'i', 0, G_OPTION_ARG_FILENAME_ARRAY, &input_files,
-      "Set the input file", NULL}
-  ,
-  {NULL}
-  ,
+    {"version", 'v', 0, G_OPTION_ARG_NONE, &print_version,
+	"Print DeepStreamSDK version", NULL}
+    ,
+	{"tiledtext", 't', 0, G_OPTION_ARG_NONE, &show_bbox_text,
+	    "Display Bounding box labels in tiled mode", NULL}
+    ,
+	{"version-all", 0, 0, G_OPTION_ARG_NONE, &print_dependencies_version,
+	    "Print DeepStreamSDK and dependencies version", NULL}
+    ,
+	{"cfg-file", 'c', 0, G_OPTION_ARG_FILENAME_ARRAY, &cfg_files,
+	    "Set the config file", NULL}
+    ,
+	{"override-cfg-file", 'o', 0, G_OPTION_ARG_FILENAME_ARRAY, &override_cfg_file,
+	    "Set the override config file, used for on-the-fly model update feature",
+	    NULL}
+    ,
+	{"input-file", 'i', 0, G_OPTION_ARG_FILENAME_ARRAY, &input_files,
+	    "Set the input file", NULL}
+    ,
+	{"playback-utc", 'p', 0, G_OPTION_ARG_INT, &playback_utc,
+	    "Playback utc; default=true (base UTC from file/rtsp URL); =false (base UTC from file-URL or RTCP Sender Report)",
+	    NULL}
+    ,
+	{"pgie-model-used", 'm', 0, G_OPTION_ARG_INT, &model_used,
+	    "PGIE Model used; {0 - Unknown [DEFAULT]}, {1: Resnet 4-class [Car, Bicycle, Person, Roadsign]}",
+	    NULL}
+    ,
+	{"no-force-tcp", 0, G_OPTION_FLAG_REVERSE, G_OPTION_ARG_NONE, &force_tcp,
+	    "Do not force TCP for RTP transport", NULL}
+    ,
+	{NULL}
+    ,
 };
 
 /**
@@ -110,6 +148,7 @@ all_bbox_generated (AppCtx * appCtx, GstBuffer * buf,
           (gint) appCtx->config.primary_gie_config.unique_id) {
         if (obj->class_id >= 0 && obj->class_id < 128) {
           num_objects[obj->class_id]++;
+		  //g_print("obj->class_id:",obj->class_id);
         }
         if (appCtx->person_class_id > -1
             && obj->class_id == appCtx->person_class_id) {
@@ -127,6 +166,14 @@ all_bbox_generated (AppCtx * appCtx, GstBuffer * buf,
     }
   }
 }
+
+
+
+ 
+
+
+
+
 
 /**
  * Function to handle program interrupt signal.
@@ -556,6 +603,19 @@ overlay_graphics (AppCtx * appCtx, GstBuffer * buf,
           frame_meta_list, 0), display_meta);
   return TRUE;
 }
+static void dr_msg_cb(rd_kafka_t *rk,
+					  const rd_kafka_message_t *rkmessage, void *opaque){
+		if(rkmessage->err)
+			fprintf(stderr, "%% Message delivery failed: %s\n", 
+					rd_kafka_err2str(rkmessage->err));
+		else
+			fprintf(stderr,
+                        "%% Message delivered (%zd bytes, "
+                        "partition %"PRId32")\n",
+                        rkmessage->len, rkmessage->partition); 
+       // rkmessage被librdkafka自动销毁
+	   
+}
 
 int
 main (int argc, char *argv[])
@@ -564,7 +624,7 @@ main (int argc, char *argv[])
   GOptionGroup *group = NULL;
   GError *error = NULL;
   guint i;
-
+  
   ctx = g_option_context_new ("Nvidia DeepStream Demo");
   group = g_option_group_new ("abc", NULL, NULL, NULL, NULL);
   g_option_group_add_entries (group, entries);
@@ -606,7 +666,11 @@ main (int argc, char *argv[])
     return_value = -1;
     goto done;
   }
-
+   
+   
+	
+		
+   
   for (i = 0; i < num_instances; i++) {
     appCtx[i] = g_malloc0 (sizeof (AppCtx));
     appCtx[i]->person_class_id = -1;
@@ -628,6 +692,41 @@ main (int argc, char *argv[])
       appCtx[i]->return_value = -1;
       goto done;
     }
+	
+	 char errstr[512];          
+		//char buf[512];               
+    appCtx[i]->brokers = "localhost:9092";
+    appCtx[i]->topic = "ads-deepstream-test";
+   
+   
+	
+	appCtx[i]->conf = rd_kafka_conf_new();
+
+	if (rd_kafka_conf_set(appCtx[i]->conf, "bootstrap.servers", appCtx[i]->brokers, errstr,
+					sizeof(errstr)) != RD_KAFKA_CONF_OK){
+			fprintf(stderr, "%s\n", errstr);
+			return 1;
+	}
+
+	
+	rd_kafka_conf_set_dr_msg_cb(appCtx[i]->conf, dr_msg_cb);
+
+		
+	appCtx[i]->rk = rd_kafka_new(RD_KAFKA_PRODUCER, appCtx[i]->conf, errstr, sizeof(errstr));
+		if(!appCtx[i]->rk){
+			fprintf(stderr, "%% Failed to create new producer:%s\n", errstr);
+			return 1;
+		}
+
+		
+	appCtx[i]->rkt = rd_kafka_topic_new(appCtx[i]->rk, appCtx[i]->topic, NULL);
+		if (!appCtx[i]->rkt){
+			fprintf(stderr, "%% Failed to create topic object: %s\n", 
+					rd_kafka_err2str(rd_kafka_last_error()));
+			rd_kafka_destroy(appCtx[i]->rk);
+			return 1;
+		} 
+	
   }
 
   for (i = 0; i < num_instances; i++) {

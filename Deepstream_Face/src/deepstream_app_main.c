@@ -24,24 +24,36 @@
 #include "deepstream_config_file_parser.h"
 #include "nvds_version.h"
 #include <string.h>
+#include "json.hpp"
 #include <unistd.h>
 #include <termios.h>
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
-
+#include <fstream>
+#include <string>
+//#include "analy.h"
 #define MAX_INSTANCES 128
 #define APP_TITLE "DeepStream"
 
 #define DEFAULT_X_WINDOW_WIDTH 1920
 #define DEFAULT_X_WINDOW_HEIGHT 1080
+using json = nlohmann::json;
+typedef enum
+{
+    APP_CONFIG_ANALYTICS_MODELS_UNKNOWN = 0,
+    APP_CONFIG_ANALYTICS_RESNET_PGIE_3SGIE_TYPE_COLOR_MAKE = 1,
+} AppConfigAnalyticsModel;
 
 AppCtx *appCtx[MAX_INSTANCES];
 static guint cintr = FALSE;
 static GMainLoop *main_loop = NULL;
 static gchar **cfg_files = NULL;
 static gchar **input_files = NULL;
+static gchar **override_cfg_file = NULL;
 static gboolean print_version = FALSE;
-static gboolean show_bbox_text = FALSE;
+static gboolean playback_utc = TRUE;
+static gboolean show_bbox_text = TRUE;
+static gboolean force_tcp = TRUE;
 static gboolean print_dependencies_version = FALSE;
 static gboolean quit = FALSE;
 static gint return_value = 0;
@@ -59,28 +71,57 @@ static GMutex disp_lock;
 
 static guint rrow, rcol, rcfg;
 static gboolean rrowsel = FALSE, selecting = FALSE;
+static AppConfigAnalyticsModel model_used = APP_CONFIG_ANALYTICS_MODELS_UNKNOWN;
 
 
+
+#define PERSON_ID 0
+
+#ifdef EN_DEBUG
+#define LOGD(...) printf(__VA_ARGS__)
+#else
+#define LOGD(...)
+#endif
+
+//static TestAppCtx *testAppCtx;
 GST_DEBUG_CATEGORY (NVDS_APP);
 
+
+
+/** @} imported from deepstream-app as is */
 GOptionEntry entries[] = {
-  {"version", 'v', 0, G_OPTION_ARG_NONE, &print_version,
-      "Print DeepStreamSDK version", NULL}
-  ,
-  {"tiledtext", 't', 0, G_OPTION_ARG_NONE, &show_bbox_text,
-      "Display Bounding box labels in tiled mode", NULL}
-  ,
-  {"version-all", 0, 0, G_OPTION_ARG_NONE, &print_dependencies_version,
-      "Print DeepStreamSDK and dependencies version", NULL}
-  ,
-  {"cfg-file", 'c', 0, G_OPTION_ARG_FILENAME_ARRAY, &cfg_files,
-      "Set the config file", NULL}
-  ,
-  {"input-file", 'i', 0, G_OPTION_ARG_FILENAME_ARRAY, &input_files,
-      "Set the input file", NULL}
-  ,
-  {NULL}
-  ,
+    {"version", 'v', 0, G_OPTION_ARG_NONE, &print_version,
+	"Print DeepStreamSDK version", NULL}
+    ,
+	{"tiledtext", 't', 0, G_OPTION_ARG_NONE, &show_bbox_text,
+	    "Display Bounding box labels in tiled mode", NULL}
+    ,
+	{"version-all", 0, 0, G_OPTION_ARG_NONE, &print_dependencies_version,
+	    "Print DeepStreamSDK and dependencies version", NULL}
+    ,
+	{"cfg-file", 'c', 0, G_OPTION_ARG_FILENAME_ARRAY, &cfg_files,
+	    "Set the config file", NULL}
+    ,
+	{"override-cfg-file", 'o', 0, G_OPTION_ARG_FILENAME_ARRAY, &override_cfg_file,
+	    "Set the override config file, used for on-the-fly model update feature",
+	    NULL}
+    ,
+	{"input-file", 'i', 0, G_OPTION_ARG_FILENAME_ARRAY, &input_files,
+	    "Set the input file", NULL}
+    ,
+	{"playback-utc", 'p', 0, G_OPTION_ARG_INT, &playback_utc,
+	    "Playback utc; default=true (base UTC from file/rtsp URL); =false (base UTC from file-URL or RTCP Sender Report)",
+	    NULL}
+    ,
+	{"pgie-model-used", 'm', 0, G_OPTION_ARG_INT, &model_used,
+	    "PGIE Model used; {0 - Unknown [DEFAULT]}, {1: Resnet 4-class [Car, Bicycle, Person, Roadsign]}",
+	    NULL}
+    ,
+	{"no-force-tcp", 0, G_OPTION_FLAG_REVERSE, G_OPTION_ARG_NONE, &force_tcp,
+	    "Do not force TCP for RTP transport", NULL}
+    ,
+	{NULL}
+    ,
 };
 
 /**
@@ -90,7 +131,7 @@ GOptionEntry entries[] = {
  * are being maintained. It should be modified according to network classes
  * or can be removed altogether if not required.
  */
-static void
+/* static void
 all_bbox_generated (AppCtx * appCtx, GstBuffer * buf,
     NvDsBatchMeta * batch_meta, guint index)
 {
@@ -110,6 +151,7 @@ all_bbox_generated (AppCtx * appCtx, GstBuffer * buf,
           (gint) appCtx->config.primary_gie_config.unique_id) {
         if (obj->class_id >= 0 && obj->class_id < 128) {
           num_objects[obj->class_id]++;
+		  //g_print("obj->class_id:",obj->class_id);
         }
         if (appCtx->person_class_id > -1
             && obj->class_id == appCtx->person_class_id) {
@@ -126,7 +168,30 @@ all_bbox_generated (AppCtx * appCtx, GstBuffer * buf,
       }
     }
   }
+} */
+ 
+
+
+static void all_bbox_generated(AppCtx *appCtx, GstBuffer *buf, NvDsBatchMeta *batch_meta, guint index) {
+    // TODO: handle generally
+	//std::cout<<"aa检查111111111111111:"<<appCtx->predNames.size()<<std::endl;
+	//std::cout<<"aaaaaaaaaaaaa检查2222222222222:"<<appCtx->predSims.size()<<std::endl;
+    guint i = 0;
+    for (NvDsMetaList *l_frame = batch_meta->frame_meta_list; l_frame != NULL; l_frame = l_frame->next) {
+        NvDsFrameMeta *frame_meta = (NvDsFrameMeta *)l_frame->data;
+        for (NvDsMetaList *l_obj = frame_meta->obj_meta_list; l_obj != NULL; l_obj = l_obj->next) {
+            NvDsObjectMeta *obj = (NvDsObjectMeta *)l_obj->data;
+            std::string str = appCtx->predNames[i];
+           // g_print("%s\n", str.c_str());
+		   //std::cout<<"aaabbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbaaaaa"<<std::endl;
+            strcpy(obj->text_params.display_text, str.c_str());
+            i++;
+        }
+    }
 }
+
+
+
 
 /**
  * Function to handle program interrupt signal.
@@ -510,7 +575,7 @@ overlay_graphics (AppCtx * appCtx, GstBuffer * buf,
   int srcIndex = appCtx->active_source_index;
   if (srcIndex == -1)
     return TRUE;
-
+  std::cout<<"overlay_graphics!xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"<<std::endl;
   NvDsFrameLatencyInfo *latency_info = NULL;
   NvDsDisplayMeta *display_meta =
       nvds_acquire_display_meta_from_pool (batch_meta);
@@ -560,19 +625,72 @@ overlay_graphics (AppCtx * appCtx, GstBuffer * buf,
 int
 main (int argc, char *argv[])
 {
-  GOptionContext *ctx = NULL;
-  GOptionGroup *group = NULL;
-  GError *error = NULL;
-  guint i;
+    g_print("[INFO] Loading config...\n");
+    std::ifstream is("/home/project/Deepstream_Project/Deepstream_Face/config.json");
+    json config;
+    is >> config;
+    is.close();
+    is.clear();
+    // std::cout<<"读取开始！！！！！！！！！！！！！！"<<std::endl;
+     is.open(config["input_numImagesFile"]);
+     std::string numImages_str;
+     std::getline(is, numImages_str);
+     unsigned int numImages = std::stoi(numImages_str);
+	 //int numImages=30;
+     //std::cout<<"读取33333333333！！！！！！！！！！！！！！"<<numImages<<std::endl;
+     is.close();
+     is.clear();
+     g_print("[INFO] Reading embeddings from file...\n");
+     is.open(config["input_embeddingsFile"]);
+     json j;
+     is >> j;
+     is.close();
+ 
+     int outputDim = config["rec_outputDim"];
+     CosineSimilarityCalculator cossim;
+     std::vector<std::string> knownIds;
+	
+	 std::vector<float> savex(numImages * outputDim);
+     float *knownEmbeds = new float[numImages * outputDim];
+	 unsigned int knownEmbedCount = 0;  
+	 //std::cout<<j["小木"]<<std::endl;
+     for (json::iterator it = j.begin(); it != j.end(); ++it){
+       // for (int i = 0; i < it.value().size(); ++i) 
+			//std::cout<<"key:"<<it.key()<<it.value()<<std::endl;
+            std::copy(it.value().begin(), it.value().end(), knownEmbeds + knownEmbedCount * outputDim); 
+			int c=0;
+			 for(int i=0;i<it.value().size();i++){
+			       c++; 
+				   
+			 }
+			std::cout<<"check size:"<<c<<std::endl; 
+		    knownIds.push_back(it.key());
+		    knownEmbedCount++;
+	 }
+	savex.clear();
+	std::cout<<"check sssssssze:"<<*knownEmbeds<<std::endl;
+	for(int i=0;i<knownEmbedCount*outputDim;i++)
+		   savex.push_back(*(knownEmbeds+i));
+    std::cout<<"遍历存取的数："<<savex.size()<<std::endl;
+   for(auto i:savex)
+	   std::cout<<i<<std::endl;
+    std::cout<<"读取nownEmbedCount:"<<knownEmbedCount<<std::endl;		 
+	
+    int maxFacesPerScene = config["det_maxFacesPerScene"];
+	
+	GOptionContext *ctx = NULL;
+	GOptionGroup *group = NULL;
+	GError *error = NULL;
+	guint i;
 
-  ctx = g_option_context_new ("Nvidia DeepStream Demo");
-  group = g_option_group_new ("abc", NULL, NULL, NULL, NULL);
-  g_option_group_add_entries (group, entries);
+	ctx = g_option_context_new ("Nvidia DeepStream Demo");
+	group = g_option_group_new ("abc", NULL, NULL, NULL, NULL);
+	g_option_group_add_entries (group, entries);
 
-  g_option_context_set_main_group (ctx, group);
-  g_option_context_add_group (ctx, gst_init_get_option_group ());
+	g_option_context_set_main_group (ctx, group);
+	g_option_context_add_group (ctx, gst_init_get_option_group ());
 
-  GST_DEBUG_CATEGORY_INIT (NVDS_APP, "NVDS_APP", 0, NULL);
+    GST_DEBUG_CATEGORY_INIT (NVDS_APP, "NVDS_APP", 0, NULL);
 
   if (!g_option_context_parse (ctx, &argc, &argv, &error)) {
     NVGSTDS_ERR_MSG_V ("%s", error->message);
@@ -609,8 +727,8 @@ main (int argc, char *argv[])
 
   for (i = 0; i < num_instances; i++) {
     appCtx[i] = g_malloc0 (sizeof (AppCtx));
-    appCtx[i]->person_class_id = -1;
-    appCtx[i]->car_class_id = -1;
+   // appCtx[i]->person_class_id = -1;
+   // appCtx[i]->car_class_id = -1;
     appCtx[i]->index = i;
     appCtx[i]->active_source_index = -1;
     if (show_bbox_text) {
@@ -628,6 +746,17 @@ main (int argc, char *argv[])
       appCtx[i]->return_value = -1;
       goto done;
     }
+      // Init context for face recognition
+          appCtx[i]->knownIds = knownIds;
+          appCtx[i]->embeds = new float[maxFacesPerScene * outputDim];
+          appCtx[i]->sgieOutputDim = outputDim;
+          appCtx[i]->knownEmbedCount = knownEmbedCount;
+          g_print("[INFO] Init cuBLASLt cosine similarity calculator...\n");
+          cossim.init(knownEmbeds, knownEmbedCount, outputDim);
+		  appCtx[i]->save_embeds=knownEmbeds;
+          appCtx[i]->cossim = &cossim;
+		  appCtx[i]->save_face=savex;
+
   }
 
   for (i = 0; i < num_instances; i++) {

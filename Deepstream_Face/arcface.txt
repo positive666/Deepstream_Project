@@ -59,35 +59,41 @@
 
 [property]
 gpu-id=0
-#net-scale-factor=0.0039215697906911373
-net-scale-factor=1.0
+net-scale-factor=0.0078125
+offsets=127.5;127.5;127.5
+#net-scale-factor=1.0
 #0=RGB, 1=BGR
 model-color-format=0
-force-implicit-batch-dim=1
-#custom-network-config=yolov3.cfg
-#model-file=yolov3.weights
-model-engine-file=centerface.trt
-#onnx-file=model.onnx
-labelfile-path=labels.txt
+batch-size=1
+model-engine-file=arcface-mobilefacenet.engine
+#model-engine-file=824.engine
+
+
 
 ## 0=FP32, 1=INT8, 2=FP16 mode
 network-mode=2
-process-mode=1
-num-detected-classes=1
-gie-unique-id=1
-network-type=0
-#is-classifier=0
-output-blob-names=537;538;539;540
-## 0=Group Rectangles, 1=DBSCAN, 2=NMS, 3= DBSCAN+NMS Hybrid, 4 = None(No clustering)
-cluster-mode=4
-#maintain-aspect-ratio=1
-parse-bbox-func-name=NvDsInferParseCustomCenterFace
-custom-lib-path=nvdsinfer_custom_impl_CenterFace/libnvdsinfer_custom_impl_CenterFace.so
-#engine-create-func-name=NvDsInferYoloCudaEngineGet
-#scaling-filter=0
-#scaling-compute-hw=0
+process-mode=2
+#operate-on-gie-id=1
 
-[class-attrs-all]
-pre-cluster-threshold=0.7
-nms-iou-threshold=0.45
-threshold=0.5
+force-implicit-batch-dim=1
+#gie-unique-id=1
+network-type=100
+#is-classifier=1
+output-blob-names=prob
+## 0=Group Rectangles, 1=DBSCAN, 2=NMS, 3= DBSCAN+NMS Hybrid, 4 = None(No clustering)
+#cluster-mode=4
+#maintain-aspect-ratio=1
+#parse-bbox-func-name=NvDsInferParseCustomArcFace
+#parse-bbox-func-name=NvDsInferClassiferParseCustomSoftmax
+#custom-lib-path=nvdsinfer_custom_impl_ArcFace/libnvdsinfer_custom_impl_ArcFace.so
+
+output-tensor-meta=1
+classifier-async-mode=0
+
+
+
+
+#[class-attrs-all]
+#pre-cluster-threshold=0.7
+#nms-iou-threshold=0.45
+#threshold=0.5
