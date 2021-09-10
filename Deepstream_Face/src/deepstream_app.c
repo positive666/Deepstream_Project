@@ -19,7 +19,7 @@
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
  */
-
+#include <algorithm>
 #include <gst/gst.h>
 #include <string.h>
 #include <math.h>
@@ -27,9 +27,19 @@
 #include <time.h>
 // #include <curl.h>
 // #include <json-glib.h>
-
+#include <glib-object.h>
+#include <json-glib/json-glib.h>
+#include"cJSON.h"
+#include <assert.h>
+#include <opencv2/opencv.hpp>
+#include "rdkafka.h"
 #include "deepstream_app.h"
 
+#include <faiss/index_io.h>
+#include <faiss/IndexHNSW.h>
+#include <faiss/MetaIndexes.h>
+#include <faiss/IndexFlat.h>
+#include <faiss/IndexIVFPQ.h>
 #define MAX_DISPLAY_LEN 64
 static guint batch_num = 0;
 static guint demux_batch_num = 0;
@@ -326,15 +336,87 @@ bus_callback (GstBus * bus, GstMessage * message, gpointer data)
 // 	return 0;
 // }
 
+static int run = 1;
+
+static void stop(int sig){
+	run = 0;
+	fclose(stdin);
+}
+
+/*
+    每条消息调用一次该回调函数，说明消息是传递成功(rkmessage->err == RD_KAFKA_RESP_ERR_NO_ERROR)
+    还是传递失败(rkmessage->err != RD_KAFKA_RESP_ERR_NO_ERROR)
+    该回调函数由rd_kafka_poll()触发，在应用程序的线程上执行
+ */
+static void dr_msg_cb(rd_kafka_t *rk,
+					  const rd_kafka_message_t *rkmessage, void *opaque){
+		if(rkmessage->err)
+			fprintf(stderr, "%% Message delivery failed: %s\n", 
+					rd_kafka_err2str(rkmessage->err));
+		else
+			fprintf(stderr,
+                        "%% Message delivered (%zd bytes, "
+                        "partition %"PRId32")\n",
+                        rkmessage->len, rkmessage->partition); 
+       // rkmessage被librdkafka自动销毁
+	   
+}
+
+
+
 static void
 write_kitti_output (AppCtx * appCtx, NvDsBatchMeta * batch_meta, GstBuffer *buffer)
 {
   gchar bbox_file[1024] = { 0 };
   FILE *bbox_params_dump_file = NULL;
 
-  if (!appCtx->config.bbox_dir_path)
-    return;
+  /*  if (!appCtx->config.bbox_dir_path)
+    return ;  */
+  //continue;
+        rd_kafka_t *rk;            /*Producer instance handle*/
+		rd_kafka_topic_t *rkt;     /*topic对象*/
+		rd_kafka_conf_t *conf;     /*临时配置对象*/
+		char errstr[512];          
+		//char buf[512];             
+		const char *brokers;       
+		const char *topic;         
+		brokers = "localhost:9092";
+		topic = "test";
+        int cous=0;
+		/* 创建一个kafka配置占位 */
+		conf = rd_kafka_conf_new();
 
+		/*创建broker集群*/
+		if (rd_kafka_conf_set(conf, "bootstrap.servers", brokers, errstr,
+					sizeof(errstr)) != RD_KAFKA_CONF_OK){
+			fprintf(stderr, "%s\n", errstr);
+			return 1;
+		}
+
+		/*设置发送报告回调函数，rd_kafka_produce()接收的每条消息都会调用一次该回调函数
+		 *应用程序需要定期调用rd_kafka_poll()来服务排队的发送报告回调函数*/
+		rd_kafka_conf_set_dr_msg_cb(conf, dr_msg_cb);
+
+		/*创建producer实例
+		  rd_kafka_new()获取conf对象的所有权,应用程序在此调用之后不得再次引用它*/
+		rk = rd_kafka_new(RD_KAFKA_PRODUCER, conf, errstr, sizeof(errstr));
+		if(!rk){
+			fprintf(stderr, "%% Failed to create new producer:%s\n", errstr);
+			return 1;
+		}
+
+		/*实例化一个或多个topics(`rd_kafka_topic_t`)来提供生产或消费，topic
+		对象保存topic特定的配置，并在内部填充所有可用分区和leader brokers，*/
+		rkt = rd_kafka_topic_new(rk, topic, NULL);
+		if (!rkt){
+			fprintf(stderr, "%% Failed to create topic object: %s\n", 
+					rd_kafka_err2str(rd_kafka_last_error()));
+			rd_kafka_destroy(rk);
+			return 1;
+		}
+
+		/*用于中断的信号*/
+	    signal(SIGINT, stop);
   for (NvDsMetaList * l_frame = batch_meta->frame_meta_list; l_frame != NULL;
       l_frame = l_frame->next) {
     NvDsFrameMeta *frame_meta = l_frame->data;
@@ -345,10 +427,23 @@ write_kitti_output (AppCtx * appCtx, NvDsBatchMeta * batch_meta, GstBuffer *buff
     g_snprintf (bbox_file, sizeof (bbox_file) - 1,
         "%s/%02u_%03u_%06lu.txt", appCtx->config.bbox_dir_path,
         appCtx->index, stream_id, (gulong) frame_meta->frame_num);
-    bbox_params_dump_file = fopen (bbox_file, "w");
-    if (!bbox_params_dump_file)
-      continue;
+   // bbox_params_dump_file = fopen (bbox_file, "w");
+    /* if (!bbox_params_dump_file){
+		
+	} */ 
+      
+/* 
+		fprintf(stderr,
+					"%% Type some text and hit enter to produce message\n"
+					"%% Or just hit enter to only serve delivery reports\n"
+					"%% Press Ctrl-C or Ctrl-D to exit\n"); */
 
+
+        // JsonBuilder *builder = json_builder_new();
+
+	
+    cJSON *root = cJSON_CreateArray();
+	//g_print("xxx");
     for (NvDsMetaList * l_obj = frame_meta->obj_meta_list; l_obj != NULL;
         l_obj = l_obj->next) {
       NvDsObjectMeta *obj = (NvDsObjectMeta *) l_obj->data;
@@ -359,33 +454,156 @@ write_kitti_output (AppCtx * appCtx, NvDsBatchMeta * batch_meta, GstBuffer *buff
       // Here confidence stores detection confidence, since dump gie output
       // is before tracker plugin
       float confidence = obj->confidence;
-
+       
+	   //bbox_params_dump_file = fopen (bbox_file, "w");
+	   
       time_t utcCalc = frame_meta->ntp_timestamp - 2208988800UL ;
       struct tm * timeinfo;
       time ( &utcCalc );
       timeinfo = localtime ( &utcCalc );
-      // Serial.print( day(utcCalc )) ;
-      // Serial.print( monthutcCalc )) ;
-      // Serial.print( year(utcCalc ) );
+     
+	  
       guint frameHeight = frame_meta -> source_frame_height;
       guint frameWidth = frame_meta -> source_frame_width;
-      // printf("frame height is %d", frameHeight);
-      // printf("frame weight is %d", frameWidth);
 
 
       float areaProportion = (obj->rect_params.width * obj->rect_params.height)/(frameHeight*frameWidth);
       // curl_postjson(obj->obj_label, left, top, right, bottom, confidence, buffer->pts/G_GINT64_CONSTANT (1000000), asctime (timeinfo), areaProportion);
-      fprintf (bbox_params_dump_file,
+	  printf(  "%s  %f %f %f %f 0.0 0.0 0.0 0.0 0.0 0.0 0.0 %f\n",
+                obj->obj_label, left, top, right, bottom, confidence);
+     //在对象上添加键值对
+   //  cJSON_AddStringToObject(json,"BOX","Face");
+     //添加数组
+	    char a[20],b[20],c[20],d[20];
+		sprintf(a,"%.1lf",left);//
+		sprintf(b,"%.1lf",top);
+		sprintf(c,"%.1lf",obj->rect_params.width);
+		sprintf(d,"%.1lf",obj->rect_params.height);
+		cJSON *json = cJSON_CreateObject();
+		cJSON *array = NULL;
+		cJSON *array_2 = NULL;
+		cJSON *array_3 = NULL;
+		// cJSON *array_4 = NULL;
+		cJSON_AddNumberToObject(json,"eventTime",0);
+		cJSON_AddItemToObject(json, "box", array_2=cJSON_CreateObject());
+		
+		 //cJSON_AddStringToObject(array_2,"left","xiaohui");
+		/*  cJSON_AddItemToObject(array_2,"left",cJSON_CreateString("1"));
+		 cJSON_AddItemToObject(array_2,"address",cJSON_CreateString("HK")); */
+        
+		cJSON_AddStringToObject(array_2,"leftTopx",(a));
+		cJSON_AddStringToObject(array_2,"leftTopy",b);
+		cJSON_AddStringToObject(array_2,"width",c);
+		cJSON_AddStringToObject(array_2,"height",d);
+		// cJSON_AddItemToObject(json,"Event-Time",array=cJSON_CreateArray());
+		
+
+		cJSON_AddStringToObject(json,"type","人脸");
+		//cJSON_AddItemToObject(array_3,"人脸",cJSON_CreateString(obj->obj_label));
+		cJSON_AddStringToObject(json, "objectId", obj->obj_label);
+		 // cJSON *objx = NULL;
+		/*  cJSON_AddItemToArray(array,objx=cJSON_CreateObject());
+		 cJSON_AddItemToObject(objx,"BBOX",cJSON_CreateString("left"));
+		  cJSON_AddItemToObject(objx,"BBOX",cJSON_CreateString("top"));
+		 cJSON_AddStringToObject(objx,"left","beijing"); 
+		 //在对象上添加键值对
+		 cJSON_AddItemToArray(array,objx=cJSON_CreateObject());
+		 cJSON_AddItemToObject(objx,"name",cJSON_CreateString("andy"));
+		 cJSON_AddItemToObject(objx,"address",cJSON_CreateString("HK"));
+		 cJSON_AddNumberToObject(array,"score",confidence); */
+		cJSON_AddItemToArray(root,json); 
+		
+		char *json_data = NULL;
+		printf("data:%s\n",json_data = cJSON_Print(root));
+		free(json_data);	  
+   /*    fprintf (bbox_params_dump_file,
           // "%s 0.0 0 0.0 %f %f %f %f 0.0 0.0 0.0 0.0 0.0 0.0 0.0 %f\n",
           "Object: %s Bounding Box %f %f %f %f Confidence: %f Time: %ld Local Time: %s Ads proportion: %f\n",
 
           // obj->obj_label, left, top, right, bottom, confidence, frame_meta->ntp_timestamp - first_frame_time);
           // obj->obj_label, left, top, right, bottom, confidence, buffer->pts/G_GINT64_CONSTANT (1000000),frame_meta->ntp_timestamp);
-          obj->obj_label, left, top, right, bottom, confidence, buffer->pts/G_GINT64_CONSTANT (1000000), asctime (timeinfo), areaProportion);
-
+          obj->obj_label, left, top, right, bottom, confidence, buffer->pts/G_GINT64_CONSTANT (1000000),  (timeinfo), areaProportion); */
+       
 
     }
-    fclose (bbox_params_dump_file);
+	//cJSON_Delete(json);
+	while(run){
+		//buf=json;
+		char *buf = cJSON_PrintUnformatted(root);
+		//buf = cJSON_Print(json);
+     	int len = strlen(buf);
+         
+     	 //printf("len:%s\n",len);
+     	if(buf[len-1] == '\n')
+     		buf[--len] = '\0';
+
+     	if(len == 0){
+            /*轮询用于事件的kafka handle，
+            事件将导致应用程序提供的回调函数被调用
+            第二个参数是最大阻塞时间，如果设为0，将会是非阻塞的调用*/
+     		rd_kafka_poll(rk, 0);
+     		continue;
+     	}
+
+   // retry:
+         /*Send/Produce message.
+           这是一个异步调用，在成功的情况下，只会将消息排入内部producer队列，
+           对broker的实际传递尝试由后台线程处理，之前注册的传递回调函数(dr_msg_cb)
+           用于在消息传递成功或失败时向应用程序发回信号*/
+     	if (rd_kafka_produce(
+                    /* Topic object */
+     				rkt,
+                    /*使用内置的分区来选择分区*/
+     				RD_KAFKA_PARTITION_UA,
+                    /*生成payload的副本*/
+     				RD_KAFKA_MSG_F_COPY,
+                    /*消息体和长度*/
+     				buf, len,
+                    /*可选键及其长度*/
+     				NULL, 0,
+     				NULL) == -1){
+     		fprintf(stderr, 
+     			"%% Failed to produce to topic %s: %s\n", 
+     			rd_kafka_topic_name(rkt),
+     			rd_kafka_err2str(rd_kafka_last_error()));
+
+     		if (rd_kafka_last_error() == RD_KAFKA_RESP_ERR__QUEUE_FULL){
+                /*如果内部队列满，等待消息传输完成并retry,
+                内部队列表示要发送的消息和已发送或失败的消息，
+                内部队列受限于queue.buffering.max.messages配置项*/
+     			rd_kafka_poll(rk, 1000);
+     			//goto retry;
+     		}	
+     	}else{
+     		fprintf(stderr, "%% Enqueued message (%zd bytes) for topic %s\n", 
+     			len, rd_kafka_topic_name(rkt));
+     	}
+
+        /*producer应用程序应不断地通过以频繁的间隔调用rd_kafka_poll()来为
+        传送报告队列提供服务。在没有生成消息以确定先前生成的消息已发送了其
+        发送报告回调函数(和其他注册json过的回调函数)期间，要确保rd_kafka_poll()
+        仍然被调用*/
+     	rd_kafka_poll(rk, 0);
+     }
+        
+     //fprintf(stderr, "%% Flushing final message.. \n");
+     /*rd_kafka_flush是rd_kafka_poll()的抽象化，
+     等待所有未完成的produce请求完成，通常在销毁producer实例前完成
+     以确保所有排列中和正在传输的produce请求在销毁前完成*/
+     rd_kafka_flush(rk, 10*1000);
+
+     /* Destroy topic object */
+     rd_kafka_topic_destroy(rkt);
+
+     /* Destroy the producer instance */
+     rd_kafka_destroy(rk);
+
+  
+     //将JSON结构所占用的数据空间释放
+    
+	 cJSON_Delete(root);
+   // fclose (bbox_params_dump_file);
+	
   }
 }
 
@@ -450,42 +668,257 @@ write_kitti_past_track_output (AppCtx * appCtx, NvDsBatchMeta * batch_meta)
  * Data of different sources and frames is dumped in separate file.
  */
 static void
-write_kitti_track_output (AppCtx * appCtx, NvDsBatchMeta * batch_meta)
+write_kitti_track_output (AppCtx * appCtx, NvDsBatchMeta * batch_meta,std::vector<std::string> &predNames, std::vector<float> &predSims)
 {
-  gchar bbox_file[1024] = { 0 };
-  FILE *bbox_params_dump_file = NULL;
+      
+    // gchar bbox_file[1024] = { 0 };
+  //FILE *bbox_params_dump_file = NULL;
 
-  if (!appCtx->config.kitti_track_dir_path)
-    return;
+  /*  if (!appCtx->config.bbox_dir_path)
+    return ;  */
+  //continue;
+        rd_kafka_t *rk;            /*Producer instance handle*/
+		rd_kafka_topic_t *rkt;     /*topic对象*/
+		rd_kafka_conf_t *conf;     /*临时配置对象*/
+		char errstr[512];          
+		//char buf[512];             
+		const char *brokers;       
+		const char *topic;         
+		brokers = "localhost:9092";
+		topic = "test";
+        int cous=0;
+		/* 创建一个kafka配置占位 */
+		conf = rd_kafka_conf_new();
 
+		/*创建broker集群*/
+		if (rd_kafka_conf_set(conf, "bootstrap.servers", brokers, errstr,
+					sizeof(errstr)) != RD_KAFKA_CONF_OK){
+			fprintf(stderr, "%s\n", errstr);
+			return 1;
+		}
+
+		/*设置发送报告回调函数，rd_kafka_produce()接收的每条消息都会调用一次该回调函数
+		 *应用程序需要定期调用rd_kafka_poll()来服务排队的发送报告回调函数*/
+		rd_kafka_conf_set_dr_msg_cb(conf, dr_msg_cb);
+
+		/*创建producer实例
+		  rd_kafka_new()获取conf对象的所有权,应用程序在此调用之后不得再次引用它*/
+		rk = rd_kafka_new(RD_KAFKA_PRODUCER, conf, errstr, sizeof(errstr));
+		if(!rk){
+			fprintf(stderr, "%% Failed to create new producer:%s\n", errstr);
+			return 1;
+		}
+
+		/*实例化一个或多个topics(`rd_kafka_topic_t`)来提供生产或消费，topic
+		对象保存topic特定的配置，并在内部填充所有可用分区和leader brokers，*/
+		rkt = rd_kafka_topic_new(rk, topic, NULL);
+		if (!rkt){
+			fprintf(stderr, "%% Failed to create topic object: %s\n", 
+					rd_kafka_err2str(rd_kafka_last_error()));
+			rd_kafka_destroy(rk);
+			return 1;
+		}
+
+		/*用于中断的信号*/
+	    signal(SIGINT, stop);
   for (NvDsMetaList * l_frame = batch_meta->frame_meta_list; l_frame != NULL;
       l_frame = l_frame->next) {
     NvDsFrameMeta *frame_meta = l_frame->data;
+    // if (first_frame_time == 0){
+    //   first_frame_time = frame_meta->ntp_timestamp;
+    // }
     guint stream_id = frame_meta->pad_index;
-    g_snprintf (bbox_file, sizeof (bbox_file) - 1,
-        "%s/%02u_%03u_%06lu.txt", appCtx->config.kitti_track_dir_path,
-        appCtx->index, stream_id, (gulong) frame_meta->frame_num);
-    bbox_params_dump_file = fopen (bbox_file, "w");
-    if (!bbox_params_dump_file)
-      continue;
+   /*  g_snprintf (bbox_file, sizeof (bbox_file) - 1,
+        "%s/%02u_%03u_%06lu.txt", appCtx->config.bbox_dir_path,
+        appCtx->index, stream_id, (gulong) frame_meta->frame_num); */
+   // bbox_params_dump_file = fopen (bbox_file, "w");
+    /* if (!bbox_params_dump_file){
+		
+	} */ 
+      
+/*    
+		fprintf(stderr,
+					"%% Type some text and hit enter to produce message\n"
+					"%% Or just hit enter to only serve delivery reports\n"
+					"%% Press Ctrl-C or Ctrl-D to exit\n"); */
 
+
+        // JsonBuilder *builder = json_builder_new();
+    int index_count=0;
+	
+    cJSON *root = cJSON_CreateArray();
+	
     for (NvDsMetaList * l_obj = frame_meta->obj_meta_list; l_obj != NULL;
         l_obj = l_obj->next) {
       NvDsObjectMeta *obj = (NvDsObjectMeta *) l_obj->data;
-      float left = obj->tracker_bbox_info.org_bbox_coords.left;
-      float top = obj->tracker_bbox_info.org_bbox_coords.top;
-      float right = left + obj->tracker_bbox_info.org_bbox_coords.width;
-      float bottom = top + obj->tracker_bbox_info.org_bbox_coords.height;
-      // Here confidence stores tracker confidence value for tracker output
-      float confidence = obj->tracker_confidence;
-      guint64 id = obj->object_id;
-      fprintf (bbox_params_dump_file,
-          "%s %lu 0.0 0 0.0 %f %f %f %f 0.0 0.0 0.0 0.0 0.0 0.0 0.0 %f\n",
-          obj->obj_label, id, left, top, right, bottom, confidence);
+      float left = obj->rect_params.left;
+      float top = obj->rect_params.top;
+      float right = left + obj->rect_params.width;
+      float bottom = top + obj->rect_params.height;
+      // Here confidence stores detection confidence, since dump gie output
+      // is before tracker plugin
+      float confidence = obj->confidence;
+       
+	   //bbox_params_dump_file = fopen (bbox_file, "w");
+	   
+      time_t utcCalc = frame_meta->ntp_timestamp - 2208988800UL ;
+      struct tm * timeinfo;
+      time ( &utcCalc );
+      timeinfo= gmtime(&utcCalc );
+	  timeinfo->tm_hour+=8;
+     
+	  char result[50];
+	  size_t dstSize = strftime(result, 50, "%Y-%m-%d %T", timeinfo);
+      guint frameHeight = frame_meta -> source_frame_height;
+      guint frameWidth = frame_meta -> source_frame_width;
+
+   
+      float areaProportion = (obj->rect_params.width * obj->rect_params.height)/(frameHeight*frameWidth);
+      // curl_postjson(obj->obj_label, left, top, right, bottom, confidence, buffer->pts/G_GINT64_CONSTANT (1000000), asctime (timeinfo), areaProportion);
+	/*   printf(  "%s  %f %f %f %f 0.0 0.0 0.0 0.0 0.0 0.0 0.0 %f\n",
+                obj->obj_label, left, top, right, bottom, confidence); */
+     //在对象上添加键值对
+   //  cJSON_AddStringToObject(json,"BOX","Face");
+     //添加数组
+	    char a[20],b[20],c[20],d[20];
+		sprintf(a,"%.1lf",left);//
+		sprintf(b,"%.1lf",top);
+		sprintf(c,"%.1lf",obj->rect_params.width);
+		sprintf(d,"%.1lf",obj->rect_params.height);
+		cJSON *json = cJSON_CreateObject();
+		cJSON *array = NULL;
+		cJSON *array_2 = NULL;
+		cJSON *array_3 = NULL;
+		// cJSON *array_4 = NULL;
+		//cJSON_AddNumberToObject(json,"eventTime",0);
+		cJSON_AddItemToObject(json, "Box", array_2=cJSON_CreateObject());
+		
+		 //cJSON_AddStringToObject(array_2,"left","xiaohui");
+		/*  cJSON_AddItemToObject(array_2,"left",cJSON_CreateString("1"));
+		 cJSON_AddItemToObject(array_2,"address",cJSON_CreateString("HK")); */
+        
+		cJSON_AddStringToObject(array_2,"leftTopx",(a));
+		cJSON_AddStringToObject(array_2,"leftTopy",b);
+		cJSON_AddStringToObject(array_2,"width",c);
+		cJSON_AddStringToObject(array_2,"height",d);
+		// cJSON_AddItemToObject(json,"Event-Time",array=cJSON_CreateArray());
+		cJSON_AddStringToObject(json,"eventTime",result);
+		cJSON_AddStringToObject(json,"type","人脸");
+		//g_print("xxxaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:\n",appCtx->predNames.size());
+		for(auto i:predNames)
+		std::cout<<"----------------检测识别的人："<<i<<std::endl;
+		if(predNames.empty())
+			cJSON_AddStringToObject(json, "objectId", "Unknown_id");
+		else
+			cJSON_AddStringToObject(json, "objectId", predNames[index_count].c_str());
+		//g_print("xxxaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:\n",appCtx->predNames.size());
+		 // cJSON *objx = NULL;
+		/*  cJSON_AddItemToArray(array,objx=cJSON_CreateObject());
+		 cJSON_AddItemToObject(objx,"BBOX",cJSON_CreateString("left"));
+		  cJSON_AddItemToObject(objx,"BBOX",cJSON_CreateString("top"));
+		 cJSON_AddStringToObject(objx,"left","beijing"); 
+		 //在对象上添加键值对
+		 cJSON_AddItemToArray(array,objx=cJSON_CreateObject());
+		 cJSON_AddItemToObject(objx,"name",cJSON_CreateString("andy"));
+		 cJSON_AddItemToObject(objx,"address",cJSON_CreateString("HK"));
+		 cJSON_AddNumberToObject(array,"score",confidence); */
+		cJSON_AddItemToArray(root,json); 
+		
+		char *json_data = NULL;
+		printf("data:%s\n",json_data = cJSON_Print(root));
+		free(json_data);	  
+   /*    fprintf (bbox_params_dump_file,
+          // "%s 0.0 0 0.0 %f %f %f %f 0.0 0.0 0.0 0.0 0.0 0.0 0.0 %f\n",
+          "Object: %s Bounding Box %f %f %f %f Confidence: %f Time: %ld Local Time: %s Ads proportion: %f\n",
+
+          // obj->obj_label, left, top, right, bottom, confidence, frame_meta->ntp_timestamp - first_frame_time);
+          // obj->obj_label, left, top, right, bottom, confidence, buffer->pts/G_GINT64_CONSTANT (1000000),frame_meta->ntp_timestamp);
+          obj->obj_label, left, top, right, bottom, confidence, buffer->pts/G_GINT64_CONSTANT (1000000),  (timeinfo), areaProportion); */
+       index_count++;
+
     }
-    fclose (bbox_params_dump_file);
+	//cJSON_Delete(json);
+	while(run){
+		//buf=json;
+		char *buf = cJSON_PrintUnformatted(root);
+		//buf = cJSON_Print(json);
+     	int len = strlen(buf);
+         
+     	 //printf("len:%s\n",len);
+     	if(buf[len-1] == '\n')
+     		buf[--len] = '\0';
+
+     	if(len == 0){
+            /*轮询用于事件的kafka handle，
+            事件将导致应用程序提供的回调函数被调用
+            第二个参数是最大阻塞时间，如果设为0，将会是非阻塞的调用*/
+     		rd_kafka_poll(rk, 0);
+     		continue;
+     	}
+
+   // retry:
+         /*Send/Produce message.
+           这是一个异步调用，在成功的情况下，只会将消息排入内部producer队列，
+           对broker的实际传递尝试由后台线程处理，之前注册的传递回调函数(dr_msg_cb)
+           用于在消息传递成功或失败时向应用程序发回信号*/
+     	if (rd_kafka_produce(
+                    /* Topic object */
+     				rkt,
+                    /*使用内置的分区来选择分区*/
+     				RD_KAFKA_PARTITION_UA,
+                    /*生成payload的副本*/
+     				RD_KAFKA_MSG_F_COPY,
+                    /*消息体和长度*/
+     				buf, len,
+                    /*可选键及其长度*/
+     				NULL, 0,
+     				NULL) == -1){
+     		fprintf(stderr, 
+     			"%% Failed to produce to topic %s: %s\n", 
+     			rd_kafka_topic_name(rkt),
+     			rd_kafka_err2str(rd_kafka_last_error()));
+
+     		if (rd_kafka_last_error() == RD_KAFKA_RESP_ERR__QUEUE_FULL){
+                /*如果内部队列满，等待消息传输完成并retry,
+                内部队列表示要发送的消息和已发送或失败的消息，
+                内部队列受限于queue.buffering.max.messages配置项*/
+     			rd_kafka_poll(rk, 1000);
+     			//goto retry;
+     		}	
+     	}else{
+     		fprintf(stderr, "%% Enqueued message (%zd bytes) for topic %s\n", 
+     			len, rd_kafka_topic_name(rkt));
+     	}
+
+        /*producer应用程序应不断地通过以频繁的间隔调用rd_kafka_poll()来为
+        传送报告队列提供服务。在没有生成消息以确定先前生成的消息已发送了其
+        发送报告回调函数(和其他注册json过的回调函数)期间，要确保rd_kafka_poll()
+        仍然被调用*/
+     	rd_kafka_poll(rk, 0);
+     }
+        
+     //fprintf(stderr, "%% Flushing final message.. \n");
+     /*rd_kafka_flush是rd_kafka_poll()的抽象化，
+     等待所有未完成的produce请求完成，通常在销毁producer实例前完成
+     以确保所有排列中和正在传输的produce请求在销毁前完成*/
+     rd_kafka_flush(rk, 10*1000);
+
+     /* Destroy topic object */
+     rd_kafka_topic_destroy(rkt);
+
+     /* Destroy the producer instance */
+     rd_kafka_destroy(rk);
+
+  
+     //将JSON结构所占用的数据空间释放
+    
+	 cJSON_Delete(root);
+	 //predNames.clear();
+   // fclose (bbox_params_dump_file);
+	
   }
 }
+
 
 static gint
 component_id_compare_func (gconstpointer a, gconstpointer b)
@@ -508,118 +941,101 @@ component_id_compare_func (gconstpointer a, gconstpointer b)
  * It also demonstrates how to join the different labels(PGIE + SGIEs)
  * of an object to form a single string.
  */
-static void
-process_meta (AppCtx * appCtx, NvDsBatchMeta * batch_meta)
-{
-  // For single source always display text either with demuxer or with tiler
-  if (!appCtx->config.tiled_display_config.enable ||
-      appCtx->config.num_source_sub_bins == 1) {
-    appCtx->show_bbox_text = 1;
-  }
-
-  for (NvDsMetaList * l_frame = batch_meta->frame_meta_list; l_frame != NULL;
-      l_frame = l_frame->next) {
-    NvDsFrameMeta *frame_meta = l_frame->data;
-    for (NvDsMetaList * l_obj = frame_meta->obj_meta_list; l_obj != NULL;
-        l_obj = l_obj->next) {
-      NvDsObjectMeta *obj = (NvDsObjectMeta *) l_obj->data;
-      gint class_index = obj->class_id;
-      NvDsGieConfig *gie_config = NULL;
-      gchar *str_ins_pos = NULL;
-
-      if (obj->unique_component_id ==
-          (gint) appCtx->config.primary_gie_config.unique_id) {
-        gie_config = &appCtx->config.primary_gie_config;
-      } else {
-        for (gint i = 0; i < (gint) appCtx->config.num_secondary_gie_sub_bins;
-            i++) {
-          gie_config = &appCtx->config.secondary_gie_sub_bin_config[i];
-          if (obj->unique_component_id == (gint) gie_config->unique_id) {
-            break;
-          }
-          gie_config = NULL;
-        }
-      }
-      g_free (obj->text_params.display_text);
-      obj->text_params.display_text = NULL;
-
-      if (gie_config != NULL) {
-        if (g_hash_table_contains (gie_config->bbox_border_color_table,
-                class_index + (gchar *) NULL)) {
-          obj->rect_params.border_color =
-              *((NvOSD_ColorParams *)
-              g_hash_table_lookup (gie_config->bbox_border_color_table,
-                  class_index + (gchar *) NULL));
-        } else {
-          obj->rect_params.border_color = gie_config->bbox_border_color;
-        }
-        obj->rect_params.border_width = appCtx->config.osd_config.border_width;
-
-        if (g_hash_table_contains (gie_config->bbox_bg_color_table,
-                class_index + (gchar *) NULL)) {
-          obj->rect_params.has_bg_color = 1;
-          obj->rect_params.bg_color =
-              *((NvOSD_ColorParams *)
-              g_hash_table_lookup (gie_config->bbox_bg_color_table,
-                  class_index + (gchar *) NULL));
-        } else {
-          obj->rect_params.has_bg_color = 0;
-        }
-      }
-
-      if (!appCtx->show_bbox_text)
-        continue;
-
-      obj->text_params.x_offset = obj->rect_params.left;
-      obj->text_params.y_offset = obj->rect_params.top - 30;
-      obj->text_params.font_params.font_color =
-          appCtx->config.osd_config.text_color;
-      obj->text_params.font_params.font_size =
-          appCtx->config.osd_config.text_size;
-      obj->text_params.font_params.font_name = appCtx->config.osd_config.font;
-      if (appCtx->config.osd_config.text_has_bg) {
-        obj->text_params.set_bg_clr = 1;
-        obj->text_params.text_bg_clr = appCtx->config.osd_config.text_bg_color;
-      }
-
-      obj->text_params.display_text = g_malloc (128);
-      obj->text_params.display_text[0] = '\0';
-      str_ins_pos = obj->text_params.display_text;
-
-      if (obj->obj_label[0] != '\0')
-        sprintf (str_ins_pos, "%s", obj->obj_label);
-      str_ins_pos += strlen (str_ins_pos);
-
-      if (obj->object_id != UNTRACKED_OBJECT_ID) {
-        /** object_id is a 64-bit sequential value;
-         * but considering the display aesthetic,
-         * trimming to lower 32-bits */
-        if (appCtx->config.tracker_config.display_tracking_id) {
-          guint64 const LOW_32_MASK = 0x00000000FFFFFFFF;
-          sprintf (str_ins_pos, " %lu", (obj->object_id & LOW_32_MASK));
-          str_ins_pos += strlen (str_ins_pos);
-        }
-      }
-
-      obj->classifier_meta_list =
-          g_list_sort (obj->classifier_meta_list, component_id_compare_func);
-      for (NvDsMetaList * l_class = obj->classifier_meta_list; l_class != NULL;
-          l_class = l_class->next) {
-        NvDsClassifierMeta *cmeta = (NvDsClassifierMeta *) l_class->data;
-        for (NvDsMetaList * l_label = cmeta->label_info_list; l_label != NULL;
-            l_label = l_label->next) {
-          NvDsLabelInfo *label = (NvDsLabelInfo *) l_label->data;
-          if (label->pResult_label) {
-            sprintf (str_ins_pos, " %s", label->pResult_label);
-          } else if (label->result_label[0] != '\0') {
-            sprintf (str_ins_pos, " %s", label->result_label);
-          }
-          str_ins_pos += strlen (str_ins_pos);
-        }
-
-      }
+static void process_meta(AppCtx *appCtx, NvDsBatchMeta *batch_meta) {
+    // For single source always display text either with demuxer or with tiler
+    if (!appCtx->config.tiled_display_config.enable || appCtx->config.num_source_sub_bins == 1) {
+        appCtx->show_bbox_text = 1;
     }
-  }
+
+    for (NvDsMetaList *l_frame = batch_meta->frame_meta_list; l_frame != NULL; l_frame = l_frame->next) {
+        NvDsFrameMeta *frame_meta = (NvDsFrameMeta *)l_frame->data;
+        for (NvDsMetaList *l_obj = frame_meta->obj_meta_list; l_obj != NULL; l_obj = l_obj->next) {
+            NvDsObjectMeta *obj = (NvDsObjectMeta *)l_obj->data;
+            gint class_index = obj->class_id;
+            NvDsGieConfig *gie_config = NULL;
+            gchar *str_ins_pos = NULL;
+
+            if (obj->unique_component_id == (gint)appCtx->config.primary_gie_config.unique_id) {
+                gie_config = &appCtx->config.primary_gie_config;
+            } else {
+                for (gint i = 0; i < (gint)appCtx->config.num_secondary_gie_sub_bins; i++) {
+                    gie_config = &appCtx->config.secondary_gie_sub_bin_config[i];
+                    if (obj->unique_component_id == (gint)gie_config->unique_id) {
+                        break;
+                    }
+                    gie_config = NULL;
+                }
+            }
+            g_free(obj->text_params.display_text);
+            obj->text_params.display_text = NULL;
+
+            if (gie_config != NULL) {
+                if (g_hash_table_contains(gie_config->bbox_border_color_table, class_index + (gchar *)NULL)) {
+                    obj->rect_params.border_color = *((NvOSD_ColorParams *)g_hash_table_lookup(
+                        gie_config->bbox_border_color_table, class_index + (gchar *)NULL));
+                } else {
+                    obj->rect_params.border_color = gie_config->bbox_border_color;
+                }
+                obj->rect_params.border_width = appCtx->config.osd_config.border_width;
+
+                if (g_hash_table_contains(gie_config->bbox_bg_color_table, class_index + (gchar *)NULL)) {
+                    obj->rect_params.has_bg_color = 1;
+                    obj->rect_params.bg_color = *((NvOSD_ColorParams *)g_hash_table_lookup(
+                        gie_config->bbox_bg_color_table, class_index + (gchar *)NULL));
+                } else {
+                    obj->rect_params.has_bg_color = 0;
+                }
+            }
+
+            if (!appCtx->show_bbox_text)
+                continue;
+
+            obj->text_params.x_offset = obj->rect_params.left;
+            obj->text_params.y_offset = obj->rect_params.top - 30;
+            obj->text_params.font_params.font_color = appCtx->config.osd_config.text_color;
+            obj->text_params.font_params.font_size = appCtx->config.osd_config.text_size;
+            obj->text_params.font_params.font_name = appCtx->config.osd_config.font;
+            if (appCtx->config.osd_config.text_has_bg) {
+                obj->text_params.set_bg_clr = 1;
+                obj->text_params.text_bg_clr = appCtx->config.osd_config.text_bg_color;
+            }
+
+            obj->text_params.display_text = (char *)g_malloc(128);
+            obj->text_params.display_text[0] = '\0';
+            str_ins_pos = obj->text_params.display_text;
+
+            if (obj->obj_label[0] != '\0')
+                sprintf(str_ins_pos, "%s", obj->obj_label);
+            str_ins_pos += strlen(str_ins_pos);
+
+            if (obj->object_id != UNTRACKED_OBJECT_ID) {
+                /** object_id is a 64-bit sequential value;
+                 * but considering the display aesthetic,
+                 * trimming to lower 32-bits */
+                if (appCtx->config.tracker_config.display_tracking_id) {
+                    guint64 const LOW_32_MASK = 0x00000000FFFFFFFF;
+                    sprintf(str_ins_pos, " %lu", (obj->object_id & LOW_32_MASK));
+                    str_ins_pos += strlen(str_ins_pos);
+                }
+            }
+
+            
+         /*    obj->classifier_meta_list = g_list_sort(obj->classifier_meta_list, component_id_compare_func);
+            for (NvDsMetaList *l_class = obj->classifier_meta_list; l_class != NULL; l_class = l_class->next) {
+                NvDsClassifierMeta *cmeta = (NvDsClassifierMeta *)l_class->data;
+                for (NvDsMetaList *l_label = cmeta->label_info_list; l_label != NULL; l_label = l_label->next) {
+                    NvDsLabelInfo *label = (NvDsLabelInfo *)l_label->data;
+                    if (label->pResult_label) {
+                        sprintf(str_ins_pos, " %s", label->pResult_label);
+                    } else if (label->result_label[0] != '\0') {
+                        sprintf(str_ins_pos, " %s", label->result_label);
+                    }
+                    str_ins_pos += strlen(str_ins_pos);
+                }
+            } */
+           
+        }
+    }
 }
 
 /**
@@ -635,7 +1051,10 @@ process_buffer (GstBuffer * buf, AppCtx * appCtx, guint index)
     NVGSTDS_WARN_MSG_V ("Batch meta not found for buffer %p", buf);
     return;
   }
+ 
   process_meta (appCtx, batch_meta);
+  
+  //write_kitti_output (appCtx, batch_meta, buf);
   //NvDsInstanceData *data = &appCtx->instance_data[index];
   //guint i;
 
@@ -644,17 +1063,18 @@ process_buffer (GstBuffer * buf, AppCtx * appCtx, guint index)
   /* Opportunity to modify the processed metadata or do analytics based on
    * type of object e.g. maintaining count of particular type of car.
    */
-  if (appCtx->all_bbox_generated_cb) {
+   if (appCtx->all_bbox_generated_cb) {
     appCtx->all_bbox_generated_cb (appCtx, buf, batch_meta, index);
-  }
+  }  
   //data->bbox_list_size = 0;
-
+//std::cout<<"测试111111111"<<std::endl;
   /*
    * callback to attach application specific additional metadata.
    */
   if (appCtx->overlay_graphics_cb) {
     appCtx->overlay_graphics_cb (appCtx, buf, batch_meta, index);
   }
+  
 }
 
 /**
@@ -675,7 +1095,7 @@ gie_primary_processing_done_buf_prob (GstPad * pad, GstPadProbeInfo * info,
   }
 
   // write_kitti_output (appCtx, batch_meta);
-  write_kitti_output (appCtx, batch_meta, buf);
+  // write_kitti_output (appCtx, batch_meta, buf);
 
   return GST_PAD_PROBE_OK;
 }
@@ -688,16 +1108,227 @@ static GstPadProbeReturn
 gie_processing_done_buf_prob (GstPad * pad, GstPadProbeInfo * info,
     gpointer u_data)
 {
+ // g_print("gie_processing_done_buf_prob:\n");
   GstBuffer *buf = (GstBuffer *) info->data;
   NvDsInstanceBin *bin = (NvDsInstanceBin *) u_data;
   guint index = bin->index;
   AppCtx *appCtx = bin->appCtx;
-
+  
   if (gst_buffer_is_writable (buf))
     process_buffer (buf, appCtx, index);
+  
   return GST_PAD_PROBE_OK;
 }
 
+static GstPadProbeReturn
+tiler_src_pad_buffer_probe (GstPad * pad, GstPadProbeInfo * info, gpointer u_data){
+    printf("启动自定义探针!!!!!!!!!!!!!!!!!!!\n");
+    GstBuffer *buf = (GstBuffer *) info->data;
+    guint num_rects = 0; 
+    NvDsObjectMeta *obj_meta = NULL;
+    guint vehicle_count = 0;
+    guint person_count = 0;
+    NvDsMetaList * l_frame = NULL;
+    NvDsMetaList * l_obj = NULL;
+   // NvDsDisplayMeta *display_meta = NULL;
+    NvDsBatchMeta *batch_meta = gst_buffer_get_nvds_batch_meta (buf);
+    //char_rec = CTCGreedyDecoderLayer(outputBboxBuffer,1,25,5990);//int
+ 
+	//std::vector<std::string> *file_to_vector=InputData_To_Vector();
+    for (l_frame = batch_meta->frame_meta_list; l_frame != NULL; l_frame = l_frame->next) {
+        NvDsFrameMeta *frame_meta = (NvDsFrameMeta *) (l_frame->data);//单帧	
+        guint batch_id = frame_meta->batch_id;
+        int  surface_id = frame_meta->source_id;
+        
+        for (l_obj = frame_meta->obj_meta_list; l_obj != NULL; l_obj = l_obj->next) {
+            guint class_id = 2555;
+            gfloat model_prob = 0;
+            obj_meta = (NvDsObjectMeta *) (l_obj->data);
+            guint64 track_id = obj_meta->object_id;
+            NvOSD_RectParams rect = obj_meta->rect_params;
+            gint color_id = obj_meta->class_id;
+            gfloat color_prob = obj_meta->confidence;
+            gchar text[128] = "";
+			
+        for (NvDsMetaList * l_class = obj_meta->classifier_meta_list; l_class != NULL; l_class = l_class->next) {
+                NvDsClassifierMeta *cmeta = (NvDsClassifierMeta *) l_class->data;
+                for (NvDsMetaList * l_label = cmeta->label_info_list; l_label != NULL; l_label = l_label->next) {
+                    NvDsLabelInfo *label = (NvDsLabelInfo *) l_label->data;
+                    class_id = label->result_class_id;
+                    model_prob = label->result_prob;
+				   //NvDsLabelInfo *label_info =
+                  //nvds_acquire_label_info_meta_from_pool (batch_meta);
+			            //label->result_class_id =ind ;
+					  // label->result_prob = 0.5;
+                    if (label->result_label[0] != '\0' ){ 
+                      // g_print("class:%s\n", label->result_label);
+                       
+						// strcpy (label->result_label,
+                          //   label->class_id ); */
+						sprintf(text, "text: %s", label->result_label);
+                        printf("text: %s\n", text);
+						
+                    }
+                }
+            }
+        }
+            
+    }
+   //frame_number++;
+    return GST_PAD_PROBE_OK;
+}
+
+
+/*
+ * Get embedding from tensor meta output
+ */
+ 
+static void get_sgie_tensor_output(AppCtx *appCtx, NvDsBatchMeta *batch_meta) {
+    int count = 0;
+    std::cout<<"获取二级模型推理： "<<std::endl;
+    for (NvDsMetaList *l_frame = batch_meta->frame_meta_list; l_frame != NULL; l_frame = l_frame->next) {
+        NvDsFrameMeta *frame_meta = (NvDsFrameMeta *)l_frame->data;
+        for (NvDsMetaList *l_obj = frame_meta->obj_meta_list; l_obj != NULL; l_obj = l_obj->next) {
+            NvDsObjectMeta *obj = (NvDsObjectMeta *)l_obj->data;
+            for (NvDsMetaList *l_user = obj->obj_user_meta_list; l_user != NULL; l_user = l_user->next) {
+                NvDsUserMeta *user_meta = (NvDsUserMeta *)l_user->data;
+                if (user_meta->base_meta.meta_type == NVDSINFER_TENSOR_OUTPUT_META) {
+                    NvDsInferTensorMeta *tensor_meta = (NvDsInferTensorMeta *)user_meta->user_meta_data;
+                    /*
+                    for (unsigned int i = 0; i < tensor_meta->num_output_layers; i++) {
+                        NvDsInferLayerInfo *info = &tensor_meta->output_layers_info[i];
+                        info->buffer = tensor_meta->out_buf_ptrs_host[i];
+                        if (tensor_meta->out_buf_ptrs_dev[i]) {
+                            cudaMemcpy(tensor_meta->out_buf_ptrs_host[i], tensor_meta->out_buf_ptrs_dev[i],
+                                       info->inferDims.numElements * 4, cudaMemcpyDeviceToHost);
+                        }
+                    }
+                    float *outputCoverageBuffer = (float *)tensor_meta->output_layers_info[0].buffer;
+                    */
+                     // float *outputCoverageBuffer = (float *)tensor_meta->output_layers_info[0].buffer;
+                    float *outputCoverageBuffer = (float *)tensor_meta->out_buf_ptrs_host[0];
+					
+                    std::copy(outputCoverageBuffer, outputCoverageBuffer + appCtx->sgieOutputDim,
+                              appCtx->embeds + count * appCtx->sgieOutputDim);
+							  
+					//std::cout<<"eBuffer:"<<outputCoverageBuffer[512]<<std::endl;	
+					 /* for(int i=0;i<512;i++)
+						 std::cout<<*(outputCoverageBuffer+i)<<","	; */
+                    count++;
+                    
+                }
+            }
+        }
+    }
+
+    appCtx->embedCount = count;
+}
+
+/* void build_database(std::vector<std::string> &name,float  *fea){
+	
+	
+	int d=512;   //设定维度
+	int ncentroids=200;  //
+	int nq=name.size();
+	float *xb=new float[d*name.size()];
+	float *xq = new float[d * nq];
+	
+	index.add_with_ids(5, fea, name); 
+	
+	faiss::IndexFlatL2 index(d);           // call constructor
+    printf("is_trained = %s\n", index.is_trained ? "true" : "false");
+    std::cout<<"build database:"<<nq<<std::endl;
+	//FILE *fr;
+    //fr=fopen("../save.faissindex","wb");
+   //faiss::write_index(&index, fr);
+	index.add(name.size(),fea);  //添加索引向量
+    //faiss::read_index("../save.txt");
+	faiss::write_index(&index, "../save_new.faissindex");
+	printf("ntotal = %ld\n", index.ntotal);
+	 faiss::Index *index_new = faiss::read_index("/home/project/Deepstream_Project/Deepstream_Face/arcface/save_new.faissindex") ;
+	int k=1;
+	       // search xq
+        long *I = new long[k * nq];     //？
+        float *D = new float[k * nq];     //？
+        index.search(nq, fea, k, D, I); 
+        // print results
+        printf("I (5 first results)=\n");
+        for(int i = 0; i < 5; i++) {
+            for(int j = 0; j < k; j++)
+                printf("%5ld ", I[i * k + j]);
+            printf("\n");
+        }
+
+        printf("I (5 last results)=\n");
+        for(int i = nq - 5; i < nq; i++) {
+            for(int j = 0; j < k; j++)
+                printf("%5ld ", I[i * k + j]);
+            printf("\n");
+        }
+		delete [] I;
+		delete [] D;
+} */
+
+float dotProduct(const std::vector<float>& v1, const std::vector<float>& v2)
+ {
+        assert(v1.size() == v2.size());
+        float ret = 0.0;
+        for (std::vector<float>::size_type i = 0; i != v1.size(); ++i)
+         {
+                ret += v1[i] * v2[i];
+         }
+        return ret;
+ }
+float module(const std::vector<float>& v)
+ {
+        float ret = 0.0;
+        for (std::vector<float>::size_type i = 0; i != v.size(); ++i)
+             {
+                ret += v[i] * v[i];
+             }
+        return sqrt(ret);
+}
+float cosine(const std::vector<float>& v1, const std::vector<float>& v2)
+{
+   assert(v1.size() == v2.size());
+   return dotProduct(v1, v2) / (module(v1) * module(v2));
+}
+
+/*
+ * Parse outputs, get max cosine similarity
+ */
+void get_outputs(AppCtx *appCtx, float *sims, std::vector<std::string> &predNames, std::vector<float> &predSims) {
+    predNames.clear();
+    predSims.clear();
+	std::cout<<"开始相似度计算"<<std::endl;
+    for (int i = 0; i < appCtx->embedCount; ++i) {
+        int argmax = std::distance(
+            sims + i * appCtx->knownEmbedCount,
+            std::max_element(sims + i * appCtx->knownEmbedCount, sims + (i + 1) * appCtx->knownEmbedCount));
+        float sim = *(sims + i * appCtx->knownEmbedCount + argmax);
+        predNames.push_back(appCtx->knownIds[argmax]);
+        predSims.push_back(sim);
+        std::cout<<"sim:"<<sim<<std::endl;
+    }
+}
+
+ReshapeandNormalize(float *out, cv::Mat &feature, const int &MAT_SIZE, const int &outSize) {
+    for (int i = 0; i < MAT_SIZE; i++)
+    {
+        cv::Mat onefeature(1, outSize, CV_32FC1, out + i * outSize);
+        cv::normalize(onefeature, onefeature);
+        onefeature.copyTo(feature.row(i));
+    }
+}
+
+
+Reshape(float *out, cv::Mat &feature, const int &MAT_SIZE, const int &outSize) {
+    for (int i = 0; i < MAT_SIZE; i++)
+    {
+        cv::Mat onefeature(1, outSize, CV_32FC1, out + i * outSize);
+        onefeature.copyTo(feature.row(i));
+    }
+}
 /**
  * Buffer probe function after tracker.
  */
@@ -713,19 +1344,106 @@ analytics_done_buf_prob (GstPad * pad, GstPadProbeInfo * info, gpointer u_data)
     NVGSTDS_WARN_MSG_V ("Batch meta not found for buffer %p", buf);
     return GST_PAD_PROBE_OK;
   }
-
+  //int index=0;
+/*
+     * Get embedding and do feature matching
+     */
+	// appCtx->embeds={0.041638121, -0.041558761, -0.027988015, -0.018610178, 0.0082403272, 0.023054399, 0.061690025, 0.055552769, 0.009688667, -0.032035429, 0.061901655, 0.024747435, -0.0028569996, -0.028860986, -0.0028652663, 0.0076054386, -0.023041172};
+    get_sgie_tensor_output(appCtx, batch_meta);
+    if (appCtx->embedCount > 0) { // in case use `interval` pgie property
+         std::cout<<"待检测的人脸数量"<<appCtx->embedCount<<std::endl;
+		// std::cout<<"样本库的人脸数量"<<appCtx->knownEmbedCount<<std::endl;
+		 cv::Mat face_feature(appCtx->embedCount, appCtx->sgieOutputDim, CV_32FC1);
+		 cv::Mat face_feature2(appCtx->knownEmbedCount, appCtx->sgieOutputDim, CV_32FC1);
+        /* std::vector<std::vector<float>>  embed(appCtx->embedCount*appCtx->sgieOutputDim);
+		int c=0;
+		for(int i=0;i<appCtx->embedCount;i++)
+		    for(int j=0;j<appCtx->sgieOutputDim;j++)
+			{
+				embed[i][j]=*(appCtx->embeds+(i+1)*j);
+				c++;
+				
+			}
+	    std::cout<<"次数"<<c<<std::endl;  */ 
+	   // ind++;
+		appCtx->predNames.clear();
+        appCtx->predSims.clear();
+		//float outx[appCtx->sgieOutputDim * appCtx->embedCount];
+		//int rowSize = ind % appCtx->embedCount == 0 ? appCtx->embedCount : ind % appCtx->embedCount;
+        // float *sims = new float[appCtx->embedCount * appCtx->knownEmbedCount];
+		cv::Mat feature(appCtx->embedCount, appCtx->sgieOutputDim, CV_32FC1);
+		ReshapeandNormalize(appCtx->embeds, feature, appCtx->embedCount, appCtx->sgieOutputDim);
+		cv::Mat feature2(appCtx->knownEmbedCount, appCtx->sgieOutputDim, CV_32FC1);
+		Reshape(appCtx->save_embeds,feature2, appCtx->knownEmbedCount, appCtx->sgieOutputDim);
+		//appCtx->embeds=NULL;
+		std::cout<<"获得的人脸特征"<<feature<<std::endl;
+		//feature.copyTo(face_feature.rowRange(ind - rowSize, ind));
+	//	feature2.copyTo(face_feature2.rowRange(ind - rowSize, ind));
+		//std::cout<<"1行数："<<feature.cols<<std::endl;
+		//std::cout<<"2数："<<feature2.cols<<std::endl;
+		//std::cout<<"检查容量:"<< appCtx->save_face.size() <<std::endl;
+		/* cv::Mat save_embed =cv:: Mat(appCtx->save_face);
+        std::cout<<"size="<<save_embed.rows<<std::endl;
+     	std::cout<<"size="<<save_embed.cols<<std::endl; */
+       /*  std::ofstream wout("face_writer.txt");
+         if (!wout.is_open()) {
+       std::cout << "File is open fail!" << std::endl;
+      } */
+	    //wout<<feature<<std::endl;
+	  
+		cv::Mat similarity = (feature2 * feature.t());
+		
+		for(int i=0;i<similarity.cols;i++){
+		    cv::Mat sub=similarity.colRange(i,i+1).clone();
+		   // std::cout<<"matrixL:"<< sub<<std::endl;
+					
+        //std::cout << "The similarity matrix of the image folder is:\n" << a1 << "!" << std::endl;
+        
+		//遍历写法：
+		double maxvalue=0, minvalue=0;
+	    cv::Point max_ind , min_ind;
+ /* minMaxLoc 求取最大值
+    Mat数组，最小值，最大值，最小值位置，最大值位置 
+    */      
+		cv::minMaxLoc(sub, 0, &maxvalue, 0, &max_ind);
+		std::cout <<"当前相似打分:" << maxvalue<< std::endl;
+		//std::cout<<"sim:"<<appCtx->knownIds[max_ind.y]<<std::endl;
+		if(maxvalue>0.5){
+			appCtx->predNames.push_back(appCtx->knownIds[max_ind.y]);
+			std::cout<<"找到该人物！！！！！！！！！！！！！！！！"<<std::endl;
+			appCtx->predSims.push_back(maxvalue);
+			
+			}
+		else {
+			appCtx->predNames.push_back("Unknown_id");
+				std::cout<<"未找到！！！！！！！！"<<std::endl;
+			}
+		}
+	
+		//write_kitti_track_output(appCtx, batch_meta,appCtx->predNames,appCtx->predSims);
+        //appCtx->cossim->calculate(appCtx->embeds, appCtx->embedCount, sims);
+		//std::cout<<appCtx->predNames[0]<<std::endl;
+       // get_outputs(appCtx, similarity, appCtx->predNames, appCtx->predSims);
+    }
+	
   /*
+  
+  
    * Output KITTI labels with tracking ID if configured to do so.
    */
-  write_kitti_track_output(appCtx, batch_meta);
+  
+   
   if (appCtx->config.tracker_config.enable_past_frame)
   {
       write_kitti_past_track_output (appCtx, batch_meta);
   }
+  
+  
   if (appCtx->bbox_generated_post_analytics_cb)
   {
     appCtx->bbox_generated_post_analytics_cb (appCtx, buf, batch_meta, index);
   }
+ 
   return GST_PAD_PROBE_OK;
 }
 
@@ -865,9 +1583,11 @@ create_demux_pipeline (AppCtx * appCtx, guint index)
 
   NVGSTDS_BIN_ADD_GHOST_PAD (instance_bin->bin, last_elem, "sink");
   if (config->osd_config.enable) {
+
     NVGSTDS_ELEM_ADD_PROBE (instance_bin->all_bbox_buffer_probe_id,
         instance_bin->osd_bin.nvosd, "sink",
         gie_processing_done_buf_prob, GST_PAD_PROBE_TYPE_BUFFER, instance_bin);
+		
   } else {
     NVGSTDS_ELEM_ADD_PROBE (instance_bin->all_bbox_buffer_probe_id,
         instance_bin->demux_sink_bin.bin, "sink",
@@ -891,15 +1611,15 @@ done:
 static gboolean
 create_processing_instance (AppCtx * appCtx, guint index)
 {
+
   gboolean ret = FALSE;
   NvDsConfig *config = &appCtx->config;
   NvDsInstanceBin *instance_bin = &appCtx->pipeline.instance_bins[index];
   GstElement *last_elem;
   gchar elem_name[32];
-
+ 
   instance_bin->index = index;
   instance_bin->appCtx = appCtx;
-
   g_snprintf (elem_name, 32, "processing_bin_%d", index);
   instance_bin->bin = gst_bin_new (elem_name);
 
@@ -922,18 +1642,26 @@ create_processing_instance (AppCtx * appCtx, guint index)
 
     last_elem = instance_bin->osd_bin.bin;
   }
-
+//g_print("xxxxxxxxxxxxxxxxxxxxxxxx2333333333321\n");
   NVGSTDS_BIN_ADD_GHOST_PAD (instance_bin->bin, last_elem, "sink");
   if (config->osd_config.enable) {
+	 // g_print("xxxxxxxxxxxxxxxxxxxxxxxx2222222222221\n");
     NVGSTDS_ELEM_ADD_PROBE (instance_bin->all_bbox_buffer_probe_id,
         instance_bin->osd_bin.nvosd, "sink",
         gie_processing_done_buf_prob, GST_PAD_PROBE_TYPE_BUFFER, instance_bin);
+		/* NVGSTDS_ELEM_ADD_PROBE (instance_bin->all_bbox_buffer_probe_id,
+        instance_bin->osd_bin.nvosd, "sink",
+        tiler_src_pad_buffer_probe, GST_PAD_PROBE_TYPE_BUFFER, instance_bin); */
   } else {
+	  
     NVGSTDS_ELEM_ADD_PROBE (instance_bin->all_bbox_buffer_probe_id,
         instance_bin->sink_bin.bin, "sink",
         gie_processing_done_buf_prob, GST_PAD_PROBE_TYPE_BUFFER, instance_bin);
   }
-
+  
+  
+  //write_kitti_output (appCtx, batch_meta, buf);
+  
   ret = TRUE;
 done:
   if (!ret) {
@@ -1030,11 +1758,11 @@ create_common_elements (NvDsConfig * config, NvDsPipeline * pipeline,
     if (!*src_elem) {
       *src_elem = pipeline->common_elements.primary_gie_bin.bin;
     }
-    NVGSTDS_ELEM_ADD_PROBE (pipeline->common_elements.
+    /* NVGSTDS_ELEM_ADD_PROBE (pipeline->common_elements.
         primary_bbox_buffer_probe_id,
         pipeline->common_elements.primary_gie_bin.bin, "src",
         gie_primary_processing_done_buf_prob, GST_PAD_PROBE_TYPE_BUFFER,
-        pipeline->common_elements.appCtx);
+        pipeline->common_elements.appCtx); */
   }
 
   if(*src_elem) {

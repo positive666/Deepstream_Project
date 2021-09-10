@@ -26,19 +26,33 @@ ifeq ($(CUDA_VER),)
 endif
 CC:= g++
 NVCC:=/usr/local/cuda-$(CUDA_VER)/bin/nvcc
-
-CFLAGS:= -Wall -std=c++11 -shared -fPIC  -fpermissive
+ 
+ 
+CFLAGS:= -Wall -std=c++11 -shared -fPIC 
 CFLAGS+= -I/opt/nvidia/deepstream/deepstream-5.1/sources/includes  -I/usr/local/cuda-$(CUDA_VER)/include
-CFLAGS+=-I/home/project/install/opencv-4.5.0/include/opencv2/
+CFLAGS+=-I/home/project/install/opencv-4.5.0/include/opencv2/   
 LIBS:= -L/usr/local/cuda-11.1/lib64 -L/usr/lib/x86_64-linux-gnu -L/opt/nvidia/deepstream/deepstream-5.1/lib/ -lnvinfer_plugin -lnvinfer -lnvparsers -L/usr/local/cuda-$(CUDA_VER)/lib64 -lcudart -lcublas -lstdc++fs 
-LFLAGS:= -shared -Wl,--start-group $(LIBS) -Wl,--end-group
-LIBS+= -lopencv_core -lopencv_imgproc -lopencv_highgui -lopencv_ml 
+LFLAGS:= -shared -Wl,--start-group $(LIBS) -Wl,--end-group   
+LIBS+= -lopencv_core -lopencv_imgproc -lopencv_highgui -lopencv_ml   
+LIBS+=/usr/local/lib/libfaiss.so  -ljsoncpp
+#LIBS+ = $(shell pkg-config opencv --cflags --libs)
+LIBS += `pkg-config --libs opencv`
+#LIBS+= -L/home/project/install/faiss-master/libfaiss.so
+
+#CFLAGS+= `pkg-config --cflags json-glib-1.0)`
+
+#LIBS+= `pkg-config --libs json-glib-1.0`
+
 
 INCS:= $(wildcard *.h)
-SRCFILES:= nvdsparsebbox_CenterFace.cpp   \
-          trt_utils.cpp              \
+INC += `pkg-config --cflags opencv`
+SRCFILES:= nvdsparsebbox_ArcFace.cpp \
+           trt_utils.cpp              \
            kernels.cu
-TARGET_LIB:= libnvdsinfer_custom_impl_CenterFace.so
+TARGET_LIB:=libnvdsinfer_custom_impl_ArcFace.so    
+
+
+
 
 TARGET_OBJS:= $(SRCFILES:.cpp=.o)
 TARGET_OBJS:= $(TARGET_OBJS:.cu=.o)
@@ -52,7 +66,12 @@ all: $(TARGET_LIB)
 	$(NVCC) -c -o $@ --compiler-options '-fPIC' $<
 
 $(TARGET_LIB) : $(TARGET_OBJS)
-	$(CC) -o $@  $(TARGET_OBJS) $(LFLAGS)
+	$(CC) -o $@  $(TARGET_OBJS) $(LFLAGS) $(LIBS)
+ 
+%: %.cpp  usr/local/lib/libfaiss.a   
+	$(CXX) -o $@ $(CFLAGS) $(LIBS) 
+#$(GPU_TARGETS): %: %.cpp ../../libfaiss.a ../../gpu/libgpufaiss.a
+#	$(NVCC) $(NVCCFLAGS) -o $@ $^ $(NVCCLDFLAGS) -I../../.. $(NVCCLIBS)
 
 clean:
 	rm -rf $(TARGET_LIB)

@@ -23,14 +23,16 @@
 #ifndef __NVGSTDS_APP_H__
 #define __NVGSTDS_APP_H__
 
-#ifdef __cplusplus
+/* #ifdef __cplusplus
 extern "C"
-{
-#endif
+{ */
+//#endif
+#include "cosine_similarity.h"
+#include <string.h>
 
 #include <gst/gst.h>
 #include <stdio.h>
-
+#include <vector>
 #include "deepstream_app_version.h"
 #include "deepstream_common.h"
 #include "deepstream_config.h"
@@ -159,6 +161,17 @@ struct _AppCtx
   GThread *ota_handler_thread;
   guint ota_inotify_fd;
   guint ota_watch_desc;
+  
+  CosineSimilarityCalculator *cossim;
+  float *embeds;
+  float *save_embeds;
+  int embedCount;
+  std::vector<std::string> knownIds;
+  std::vector<std::string> predNames;
+  std::vector<float> predSims;
+  std::vector<float>save_face;
+  int knownEmbedCount;
+  int sgieOutputDim;
 };
 
 /**
@@ -203,8 +216,8 @@ void restart_pipeline (AppCtx * appCtx);
 gboolean
 parse_config_file (NvDsConfig * config, gchar * cfg_file_path);
 
-#ifdef __cplusplus
-}
-#endif
+//#ifdef __cplusplus
+//}
+//#endif
 
 #endif

@@ -19,7 +19,7 @@
 #include <iostream>
 #include "nvdsinfer_custom_impl.h"
 #include <cassert>
-#include <cmath>
+//#include <cmath>
 #include <tuple>
 #include <memory>
 #include <opencv2/opencv.hpp>
@@ -244,7 +244,7 @@ extern "C" bool NvDsInferParseCustomCenterFace(std::vector<NvDsInferLayerInfo> c
 		faces_tmp.push_back(facebox);
 	}
    //std::cout<<"decode end!"<<std::endl;
-	const float threshold = 0.5;
+	const float threshold = 0.4;
 	nms(faces_tmp, faces, threshold);
 	for (int k = 0; k < faces.size(); k++)
 	{
@@ -255,18 +255,31 @@ extern "C" bool NvDsInferParseCustomCenterFace(std::vector<NvDsInferLayerInfo> c
 		object.width = CLIP((faces[k].x2 - faces[k].x1), 0, networkInfo.width - 1);
 		object.height = CLIP((faces[k].y2 - faces[k].y1), 0, networkInfo.height - 1);
 		
+		
+		float wide_dist = pow((faces[k].landmarks[0] - faces[k].landmarks[2]) * (faces[k].landmarks[0] - faces[k].landmarks[2]) + (faces[k].landmarks[1] - faces[k].landmarks[3]) *(faces[k].landmarks[1] - faces[k].landmarks[3]),0.5);
+        float high_dist = pow((faces[k].landmarks[0] - faces[k].landmarks[6]) * (faces[k].landmarks[0] - faces[k].landmarks[6]) + (faces[k].landmarks[1] - faces[k].landmarks[7]) *(faces[k].landmarks[1] - faces[k].landmarks[7]),0.5);
+        float dist_rate = high_dist / wide_dist;
+
+        float dist_C = pow((faces[k].landmarks[6] - faces[k].landmarks[4]) * (faces[k].landmarks[6] - faces[k].landmarks[4]) + (faces[k].landmarks[7] - faces[k].landmarks[5]) *(faces[k].landmarks[7] - faces[k].landmarks[5]),0.5);
+        float dist_D = pow((faces[k].landmarks[8] - faces[k].landmarks[4]) * (faces[k].landmarks[8] - faces[k].landmarks[4]) + (faces[k].landmarks[9] - faces[k].landmarks[5]) *(faces[k].landmarks[9] - faces[k].landmarks[5]),0.5);
+        float width_rate =fabs(dist_C / dist_D - 1);
+		
 		/* object.left = faces[k].x1;
 		object.top = faces[k].y1;
 		object.width = faces[k].x2 - faces[k].x1;
 		object.height = faces[k].y2 - faces[k].y1;
         std::cout<<"h:"<<object.height<<std::endl;
+		
 		std::cout<<"w:"<<object.width<<std::endl; */
-		if (object.width && object.height)
-		{   //std::cout<<"biu!!!!!!"<<std::endl;
-			object.detectionConfidence = 0.99;
-			object.classId = 0;
-			objectList.push_back(object);
-		}
+		std::cout<<"now width_rate:"<<width_rate<<std::endl;
+		std::cout<<"now dist_rate:"<<dist_rate<<std::endl;
+		if (object.width && object.height && dist_rate < 1.5 && width_rate <0.7)
+        {   //std::cout<<"biu!!!!!!"<<std::endl;
+          std::cout<<" ================ "<<dist_rate<< " ---- "<<width_rate << " ---- "<< high_dist<< " ---- "<< wide_dist <<std::endl;
+          object.detectionConfidence = 0.99;
+          object.classId = 0;
+          objectList.push_back(object);
+        }
 	}
 	return true;
 }
