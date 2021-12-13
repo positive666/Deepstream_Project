@@ -31,7 +31,7 @@
 #include <X11/Xutil.h>
 #include <fstream>
 #include <string>
-//#include "analy.h"
+
 #define MAX_INSTANCES 128
 #define APP_TITLE "DeepStream"
 
@@ -176,6 +176,9 @@ static void all_bbox_generated(AppCtx *appCtx, GstBuffer *buf, NvDsBatchMeta *ba
     // TODO: handle generally
 	//std::cout<<"aa检查111111111111111:"<<appCtx->predNames.size()<<std::endl;
 	//std::cout<<"aaaaaaaaaaaaa检查2222222222222:"<<appCtx->predSims.size()<<std::endl;
+	/* for(auto i:appCtx->predNames)
+		std::cout<<i<<std::endl; */
+	
     guint i = 0;
     for (NvDsMetaList *l_frame = batch_meta->frame_meta_list; l_frame != NULL; l_frame = l_frame->next) {
         NvDsFrameMeta *frame_meta = (NvDsFrameMeta *)l_frame->data;
@@ -622,6 +625,20 @@ overlay_graphics (AppCtx * appCtx, GstBuffer * buf,
   return TRUE;
 }
 
+static void dr_msg_cb(rd_kafka_t *rk,
+					  const rd_kafka_message_t *rkmessage, void *opaque){
+		if(rkmessage->err)
+			fprintf(stderr, "%% Message delivery failed: %s\n", 
+					rd_kafka_err2str(rkmessage->err));
+		else
+			fprintf(stderr,
+                        "%% Message delivered (%zd bytes, "    // C++11 requires a space between literal and string macro, 文字上的无效后缀; C ++ 11需要文字和标识符之间的空格”
+                        "partition %" PRId32 ")\n",
+                        rkmessage->len, rkmessage->partition); 
+       // rkmessage被librdkafka自动销毁
+	   
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -631,11 +648,14 @@ main (int argc, char *argv[])
     is >> config;
     is.close();
     is.clear();
-    // std::cout<<"读取开始！！！！！！！！！！！！！！"<<std::endl;
-     is.open(config["input_numImagesFile"]);
-     std::string numImages_str;
-     std::getline(is, numImages_str);
-     unsigned int numImages = std::stoi(numImages_str);
+   // std::cout<<"读取开始！！！！！！！！！！！！！！"<<std::endl;
+    unsigned int numImages= (config["input_numImagesFile"]);
+	g_print("[INFO] features numbers:\n",numImages);
+    std::string kafka_message=(config["kafka_message"]);
+	std::string kafka_topic=(config["kafka_topic"]);
+     // std::string numImages_str;
+     // std::getline(is, numImages_str);
+     // unsigned int numImages = std::stoi(numImages_str);
 	 //int numImages=30;
      //std::cout<<"读取33333333333！！！！！！！！！！！！！！"<<numImages<<std::endl;
      is.close();
@@ -647,13 +667,13 @@ main (int argc, char *argv[])
      is.close();
  
      int outputDim = config["rec_outputDim"];
-     CosineSimilarityCalculator cossim;
+     //CosineSimilarityCalculator cossim;
      std::vector<std::string> knownIds;
 	
-	 std::vector<float> savex(numImages * outputDim);
+	 //std::vector<float> savex(numImages * outputDim);
      float *knownEmbeds = new float[numImages * outputDim];
 	 unsigned int knownEmbedCount = 0;  
-	 //std::cout<<j["小木"]<<std::endl;
+	
      for (json::iterator it = j.begin(); it != j.end(); ++it){
        // for (int i = 0; i < it.value().size(); ++i) 
 			//std::cout<<"key:"<<it.key()<<it.value()<<std::endl;
@@ -663,18 +683,19 @@ main (int argc, char *argv[])
 			       c++; 
 				   
 			 }
-			std::cout<<"check size:"<<c<<std::endl; 
+			//std::cout<<"check size:"<<c<<std::endl; 
 		    knownIds.push_back(it.key());
 		    knownEmbedCount++;
 	 }
-	savex.clear();
-	std::cout<<"check sssssssze:"<<*knownEmbeds<<std::endl;
-	for(int i=0;i<knownEmbedCount*outputDim;i++)
-		   savex.push_back(*(knownEmbeds+i));
-    std::cout<<"遍历存取的数："<<savex.size()<<std::endl;
-   for(auto i:savex)
-	   std::cout<<i<<std::endl;
-    std::cout<<"读取nownEmbedCount:"<<knownEmbedCount<<std::endl;		 
+	 
+	//savex.clear();
+	//std::cout<<"check sssssssze:"<<*knownEmbeds<<std::endl;
+	/* for(int i=0;i<knownEmbedCount*outputDim;i++)
+		   savex.push_back(*(knownEmbeds+i)); */
+    //std::cout<<"遍历存取的数："<<savex.size()<<std::endl;
+    //for(auto i:savex)
+	   //std::cout<<i<<std::endl;
+    std::cout<<"读取的特征数量:"<<knownEmbedCount<<std::endl; 		 
 	
     int maxFacesPerScene = config["det_maxFacesPerScene"];
 	
@@ -726,7 +747,7 @@ main (int argc, char *argv[])
   }
 
   for (i = 0; i < num_instances; i++) {
-    appCtx[i] = g_malloc0 (sizeof (AppCtx));
+    appCtx[i] = g_malloc0 (sizeof(AppCtx));
    // appCtx[i]->person_class_id = -1;
    // appCtx[i]->car_class_id = -1;
     appCtx[i]->index = i;
@@ -747,15 +768,48 @@ main (int argc, char *argv[])
       goto done;
     }
       // Init context for face recognition
-          appCtx[i]->knownIds = knownIds;
-          appCtx[i]->embeds = new float[maxFacesPerScene * outputDim];
-          appCtx[i]->sgieOutputDim = outputDim;
-          appCtx[i]->knownEmbedCount = knownEmbedCount;
-          g_print("[INFO] Init cuBLASLt cosine similarity calculator...\n");
-          cossim.init(knownEmbeds, knownEmbedCount, outputDim);
-		  appCtx[i]->save_embeds=knownEmbeds;
-          appCtx[i]->cossim = &cossim;
-		  appCtx[i]->save_face=savex;
+    appCtx[i]->knownIds = knownIds;
+    appCtx[i]->embeds = new float[maxFacesPerScene * outputDim];
+    appCtx[i]->sgieOutputDim = outputDim;
+    appCtx[i]->knownEmbedCount = knownEmbedCount;
+          
+          //cossim.init(knownEmbeds, knownEmbedCount, outputDim);
+	appCtx[i]->save_embeds=knownEmbeds;
+         // appCtx[i]->cossim = &cossim;
+		  //appCtx[i]->save_face=savex;
+	  
+	char errstr[512];          
+		//char buf[512];    
+		
+    appCtx[i]->brokers = kafka_message.c_str();
+    appCtx[i]->topic = kafka_topic.c_str();
+	appCtx[i]->conf = rd_kafka_conf_new();
+
+	if (rd_kafka_conf_set(appCtx[i]->conf, "bootstrap.servers", appCtx[i]->brokers, errstr,
+					sizeof(errstr)) != RD_KAFKA_CONF_OK){
+			fprintf(stderr, "%s\n", errstr);
+			return 1;
+	}
+
+	
+	rd_kafka_conf_set_dr_msg_cb(appCtx[i]->conf, dr_msg_cb);
+
+		
+	appCtx[i]->rk = rd_kafka_new(RD_KAFKA_PRODUCER, appCtx[i]->conf, errstr, sizeof(errstr));
+		if(!appCtx[i]->rk){
+			fprintf(stderr, "%% Failed to create new producer:%s\n", errstr);
+			return 1;
+		}
+
+		
+	appCtx[i]->rkt = rd_kafka_topic_new(appCtx[i]->rk, appCtx[i]->topic, NULL);
+		if (!appCtx[i]->rkt){
+			fprintf(stderr, "%% Failed to create topic object: %s\n", 
+					rd_kafka_err2str(rd_kafka_last_error()));
+			rd_kafka_destroy(appCtx[i]->rk);
+			return 1;
+		} 
+		
 
   }
 
@@ -871,7 +925,7 @@ main (int argc, char *argv[])
             nvds_x_event_thread, NULL);
     }
   }
-
+ 
   /* Dont try to set playing state if error is observed */
   if (return_value != -1) {
     for (i = 0; i < num_instances; i++) {
@@ -907,6 +961,12 @@ done:
       XDestroyWindow (display, windows[i]);
     windows[i] = 0;
     g_mutex_unlock (&disp_lock);
+	
+	 /* Destroy topic object */  
+    rd_kafka_topic_destroy(appCtx[i]->rkt);  
+    
+     /* Destroy the producer instance */  
+    rd_kafka_destroy(appCtx[i]->rk);   
 
     g_free (appCtx[i]);
   }
@@ -921,7 +981,7 @@ done:
   if (main_loop) {
     g_main_loop_unref (main_loop);
   }
-
+  
   if (ctx) {
     g_option_context_free (ctx);
   }

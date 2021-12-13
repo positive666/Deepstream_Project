@@ -49,7 +49,7 @@ extern "C"
 #include "deepstream_secondary_gie.h"
 #include "deepstream_c2d_msg.h"
 #include "deepstream_image_save.h"
-
+#include "rdkafka.h"
 typedef struct _AppCtx AppCtx;
 
 typedef void (*bbox_generated_callback) (AppCtx *appCtx, GstBuffer *buf,
@@ -172,6 +172,12 @@ struct _AppCtx
   std::vector<float>save_face;
   int knownEmbedCount;
   int sgieOutputDim;
+  rd_kafka_t *rk;        /* Producer instance handle */
+  rd_kafka_conf_t *conf; /* Temporary configuration object */
+  const char *brokers;   /* Argument: broker list */
+  const char *topic;     /* Argument: topic to produce to */
+  rd_kafka_topic_t *rkt;
+  
 };
 
 /**
