@@ -29,9 +29,15 @@
 // #include <json-glib.h>
 #include <glib-object.h>
 #include <json-glib/json-glib.h>
+<<<<<<< HEAD
 #include"cJSON.h"
 
 #include "rdkafka.h"
+=======
+#include "cJSON.h"
+#include "rdkafka.h"
+#include<signal.h>
+>>>>>>> main
 #include "deepstream_app.h"
 
 #define MAX_DISPLAY_LEN 64
@@ -224,43 +230,43 @@ bus_callback (GstBus * bus, GstMessage * message, gpointer data)
  * property "gie-kitti-output-dir" must be set in configuration file.
  * Data of different sources and frames is dumped in separate file.
  */
-// static void
-// write_kitti_output (AppCtx * appCtx, NvDsBatchMeta * batch_meta)
-// {
-//   gchar bbox_file[1024] = { 0 };
-//   FILE *bbox_params_dump_file = NULL;
+static void
+ write_kitti_output (AppCtx * appCtx, NvDsBatchMeta * batch_meta)
+ {
+   gchar bbox_file[1024] = { 0 };
+   FILE *bbox_params_dump_file = NULL;
 
-//   if (!appCtx->config.bbox_dir_path)
-//     return;
+   if (!appCtx->config.bbox_dir_path)
+    return;
 
-//   for (NvDsMetaList * l_frame = batch_meta->frame_meta_list; l_frame != NULL;
-//       l_frame = l_frame->next) {
-//     NvDsFrameMeta *frame_meta = l_frame->data;
-//     guint stream_id = frame_meta->pad_index;
-//     g_snprintf (bbox_file, sizeof (bbox_file) - 1,
-//         "%s/%02u_%03u_%06lu.txt", appCtx->config.bbox_dir_path,
-//         appCtx->index, stream_id, (gulong) frame_meta->frame_num);
-//     bbox_params_dump_file = fopen (bbox_file, "w");
-//     if (!bbox_params_dump_file)
-//       continue;
+  for (NvDsMetaList * l_frame = batch_meta->frame_meta_list; l_frame != NULL;
+       l_frame = l_frame->next) {
+     NvDsFrameMeta *frame_meta = l_frame->data;
+	  guint stream_id = frame_meta->pad_index;
+    g_snprintf (bbox_file, sizeof (bbox_file) - 1,
+        "%s/%02u_%03u_%06lu.txt", appCtx->config.bbox_dir_path,
+        appCtx->index, stream_id, (gulong) frame_meta->frame_num);
+          bbox_params_dump_file = fopen (bbox_file, "w");
+    if (!bbox_params_dump_file)
+      continue;
 
-//     for (NvDsMetaList * l_obj = frame_meta->obj_meta_list; l_obj != NULL;
-//         l_obj = l_obj->next) {
-//       NvDsObjectMeta *obj = (NvDsObjectMeta *) l_obj->data;
-//       float left = obj->rect_params.left;
-//       float top = obj->rect_params.top;
-//       float right = left + obj->rect_params.width;
-//       float bottom = top + obj->rect_params.height;
-//       // Here confidence stores detection confidence, since dump gie output
-//       // is before tracker plugin
-//       float confidence = obj->confidence;
-//       fprintf (bbox_params_dump_file,
-//           "%s 0.0 0 0.0 %f %f %f %f 0.0 0.0 0.0 0.0 0.0 0.0 0.0 %f\n",
-//           obj->obj_label, left, top, right, bottom, confidence);
-//     }
-//     fclose (bbox_params_dump_file);
-//   }
-// }
+    for (NvDsMetaList * l_obj = frame_meta->obj_meta_list; l_obj != NULL;
+         l_obj = l_obj->next) {
+      NvDsObjectMeta *obj = (NvDsObjectMeta *) l_obj->data;
+      float left = obj->rect_params.left;
+      float top = obj->rect_params.top;
+       float right = left + obj->rect_params.width;
+       float bottom = top + obj->rect_params.height;
+	     float confidence = obj->confidence;
+       // Here confidence stores detection confidence, since dump gie output
+      // is before tracker plugin
+      fprintf (bbox_params_dump_file,
+           "%s 0.0 0 0.0 %f %f %f %f 0.0 0.0 0.0 0.0 0.0 0.0 0.0 %f\n",
+         obj->obj_label, left, top, right, bottom, confidence);
+    }
+     fclose (bbox_params_dump_file);
+   }
+ }
 
 // static void curl_postjson(gchar label, float left, float top, float right, float bottom, float confidence, GstClockTime relativeTime, char* localTime, float areaProportion)
 // {
@@ -358,16 +364,65 @@ static void dr_msg_cb(rd_kafka_t *rk,
 
 
 static void
-write_kitti_output (AppCtx * appCtx, NvDsBatchMeta * batch_meta, GstBuffer *buffer)
+kafka_kitti_output (AppCtx * appCtx, NvDsBatchMeta * batch_meta, GstBuffer *buffer)
 {
+<<<<<<< HEAD
   gchar bbox_file[1024] = { 0 };
   FILE *bbox_params_dump_file = NULL;
 
   /* if (!appCtx->config.bbox_dir_path)
     return; */
+=======
+  /* if (!appCtx->config.bbox_dir_path)
+    return; */
+  /*   rd_kafka_t *rk;            
+	rd_kafka_topic_t *rkt;    
+	rd_kafka_conf_t *conf;    
+	char errstr[512];          
+		//char buf[512];             
+	const char *brokers;       
+	const char *topic;         
+	brokers = "localhost:9092";
+	topic = "ads-test-deepstream";
+       
+		//创建一个kafka配置占位
+	conf = rd_kafka_conf_new();
 
-  for (NvDsMetaList * l_frame = batch_meta->frame_meta_list; l_frame != NULL;
+
+	if (rd_kafka_conf_set(conf, "bootstrap.servers", brokers, errstr,
+					sizeof(errstr)) != RD_KAFKA_CONF_OK){
+			fprintf(stderr, "%s\n", errstr);
+			//return 1;
+	}
+
+		rd_kafka_conf_set_dr_msg_cb(conf, dr_msg_cb);
+
+	rk = rd_kafka_new(RD_KAFKA_PRODUCER, conf, errstr, sizeof(errstr));
+	if(!rk){
+			fprintf(stderr, "%% Failed to create new producer:%s\n", errstr);
+			//return 1;
+		}
+
+		
+	rkt = rd_kafka_topic_new(rk, topic, NULL);
+    if (!rkt){
+			fprintf(stderr, "%% Failed to create topic object: %s\n", 
+					rd_kafka_err2str(rd_kafka_last_error()));
+			rd_kafka_destroy(rk);
+			//return 1;
+		} */
+	
+	signal(SIGINT, stop);
+ 
+       
+    cJSON *root = cJSON_CreateArray();
+>>>>>>> main
+
+    int count=0;
+  
+   for (NvDsMetaList * l_frame = batch_meta->frame_meta_list; l_frame != NULL;
       l_frame = l_frame->next) {
+<<<<<<< HEAD
     NvDsFrameMeta *frame_meta = l_frame->data;
     // if (first_frame_time == 0){
     //   first_frame_time = frame_meta->ntp_timestamp;
@@ -433,6 +488,12 @@ write_kitti_output (AppCtx * appCtx, NvDsBatchMeta * batch_meta, GstBuffer *buff
     cJSON *root = cJSON_CreateArray();
 	
     for (NvDsMetaList * l_obj = frame_meta->obj_meta_list; l_obj != NULL;
+=======
+		  count++;
+     NvDsFrameMeta *frame_meta = l_frame->data;	
+	 
+    for (NvDsMetaList * l_obj = frame_meta->obj_meta_list; l_obj != NULL;  //遍历所有BOX
+>>>>>>> main
         l_obj = l_obj->next) {
       NvDsObjectMeta *obj = (NvDsObjectMeta *) l_obj->data;
       float left = obj->rect_params.left;
@@ -451,6 +512,7 @@ write_kitti_output (AppCtx * appCtx, NvDsBatchMeta * batch_meta, GstBuffer *buff
       time ( &utcCalc );
       timeinfo= gmtime(&utcCalc );
 	  timeinfo->tm_hour+=8;
+<<<<<<< HEAD
 	  //printf ("%d/%02d/%02d ", (1900+timeinfo->tm_year), (1+timeinfo->tm_mon), timeinfo->tm_mday);
       //printf("%s %02d:%02d:%02d\n", [timeinfo->tm_wday], timeinfo->tm_hour, timeinfo->tm_min, timeinfo->tm_sec); //wday:星期
       //std::string new_time=str(1900+timeinfo->tm_year)+"-"+1+timeinfo->tm_mon+"-"timeinfo->tm_mday+"\t"+timeinfo->tm_hour+":"+timeinfo->tm_min+":"+timeinfo->tm_sec;
@@ -466,11 +528,15 @@ write_kitti_output (AppCtx * appCtx, NvDsBatchMeta * batch_meta, GstBuffer *buff
 	  //printf("is:",result);
 	  //strcpy(res,1900+timeinfo->tm_year));
 	  
+=======
+	  char result[50];
+>>>>>>> main
 	  size_t dstSize = strftime(result, 50, "%Y-%m-%d %T", timeinfo);
 
       guint frameHeight = frame_meta -> source_frame_height;
       guint frameWidth = frame_meta -> source_frame_width;
       // printf("frame height is %d", frameHeight);
+<<<<<<< HEAD
       // printf("frame weight is %d", frameWidth);
      
 
@@ -481,6 +547,11 @@ write_kitti_output (AppCtx * appCtx, NvDsBatchMeta * batch_meta, GstBuffer *buff
       //  cJSON_AddStringToObject(json,"BOX","Face");
       //添加数组
 	 
+=======
+
+      //添加数组
+	    
+>>>>>>> main
 		char a[20],b[20],c[20],d[20];
 		sprintf(a,"%.0f",left);//
 		sprintf(b,"%.0f",top);
@@ -490,6 +561,7 @@ write_kitti_output (AppCtx * appCtx, NvDsBatchMeta * batch_meta, GstBuffer *buff
 		cJSON *array = NULL;
 		cJSON *array_2 = NULL;
 		cJSON *array_3 = NULL;
+<<<<<<< HEAD
 		// cJSON *array_4 = NULL;
 		//cJSON_AddNumberToObject(json,"eventTime",0);
 		
@@ -498,12 +570,17 @@ write_kitti_output (AppCtx * appCtx, NvDsBatchMeta * batch_meta, GstBuffer *buff
 		cJSON_AddItemToObject(json, "Box", array_2=cJSON_CreateObject());
 		//cJSON_AddNumberToObject(json, "目标id", cous++);
          
+=======
+		 
+		cJSON_AddItemToObject(json, "Box", array_2=cJSON_CreateObject());
+>>>>>>> main
 		cJSON_AddStringToObject(array_2,"leftTopx",a);
 		cJSON_AddStringToObject(array_2,"leftTopy",b);
 		cJSON_AddStringToObject(array_2,"width",c);
 		cJSON_AddStringToObject(array_2,"height",d);
 		// cJSON_AddItemToObject(json,"Event-Time",array=cJSON_CreateArray());
 		cJSON_AddStringToObject(json,"eventTime",result);
+<<<<<<< HEAD
 		//char * ins=NULL;
         //sprintf(ins, "%s", obj->obj_label)
         //cJSON_AddItemToObject(json,"type","广告");
@@ -543,6 +620,27 @@ write_kitti_output (AppCtx * appCtx, NvDsBatchMeta * batch_meta, GstBuffer *buff
      	int len = strlen(buf);
          
      	 //printf("len:%s\n",len);
+=======
+		cJSON_AddStringToObject(json,"type","广告");
+		cJSON_AddStringToObject(json,"objectId",(obj->obj_label));
+		cJSON_AddItemToArray(root,json); 
+	
+     }		
+    }
+	
+	
+	/* char *json_data = NULL;
+		printf("data:%s\n",json_data = cJSON_Print(root));
+		free(json_data); */
+	char *buf = cJSON_PrintUnformatted(root);
+	//memcpy(buf,send,count);
+	rd_kafka_resp_err_t err;
+	
+    size_t len = strlen(buf); 
+     
+	//cJSON_free(send);
+     	//printf("len:%s\n",len);
+>>>>>>> main
      	if(buf[len-1] == '\n')
      		buf[--len] = '\0';
 
@@ -550,6 +648,7 @@ write_kitti_output (AppCtx * appCtx, NvDsBatchMeta * batch_meta, GstBuffer *buff
             /*轮询用于事件的kafka handle，
             事件将导致应用程序提供的回调函数被调用
             第二个参数是最大阻塞时间，如果设为0，将会是非阻塞的调用*/
+<<<<<<< HEAD
      		rd_kafka_poll(rk, 0);
      		continue;
      	}
@@ -614,6 +713,66 @@ write_kitti_output (AppCtx * appCtx, NvDsBatchMeta * batch_meta, GstBuffer *buff
    // fclose (bbox_params_dump_file);
 	
   }
+=======
+			
+     		rd_kafka_poll(appCtx->rk, 1);
+     		
+     	}
+
+    //retry:  
+	         if (rd_kafka_produce(  
+                    /* Topic object */  
+                    appCtx->rkt,  
+                    /*使用内置的分区来选择分区*/  
+                    RD_KAFKA_PARTITION_UA,  
+                    /*生成payload的副本*/  
+                    RD_KAFKA_MSG_F_COPY,  
+                    /*消息体和长度*/  
+                    buf, len,  
+                    /*可选键及其长度*/  
+                    NULL, 0,  
+                    NULL) == -1){  
+            fprintf(stderr,   
+                "%% Failed to produce to topic %s: %s\n",   
+                rd_kafka_topic_name(appCtx->rkt),  
+                rd_kafka_err2str(rd_kafka_last_error()));  
+  
+            if (rd_kafka_last_error() == RD_KAFKA_RESP_ERR__QUEUE_FULL){  
+                /*如果内部队列满，等待消息传输完成并retry, 
+                内部队列表示要发送的消息和已发送或失败的消息， 
+                内部队列受限于queue.buffering.max.messages配置项*/  
+                rd_kafka_poll(appCtx->rk, 100);  
+                //goto retry;  
+            }     
+        }
+		/* else{  
+            fprintf(stderr, "%% Enqueued message (%zd bytes) for topic %s\n",   
+                len, rd_kafka_topic_name(rkt));  
+        }   */
+  
+        /*producer应用程序应不断地通过以频繁的间隔调用rd_kafka_poll()来为 
+        传送报告队列提供服务。在没有生成消息以确定先前生成的消息已发送了其 
+        发送报告回调函数(和其他注册过的回调函数)期间，要确保rd_kafka_poll() 
+        仍然被调用*/  
+    rd_kafka_poll(appCtx->rk, 0);  
+	  
+	 
+     	
+   // fprintf(stderr, "%% Flushing final message.. \n");  
+     /*rd_kafka_flush是rd_kafka_poll()的抽象化， 
+     等待所有未完成的produce请求完成，通常在销毁producer实例前完成 
+     以确保所有排列中和正在传输的produce请求在销毁前完成*/  
+    rd_kafka_flush(appCtx->rk, 1);
+  
+     /* Destroy topic object */  
+    /* rd_kafka_topic_destroy(rkt);  
+    
+     /* Destroy the producer instance */  
+    //rd_kafka_destroy(rk);   
+	free(buf);
+    cJSON_Delete(root);
+  
+>>>>>>> main
 }
 
 /**
@@ -899,7 +1058,7 @@ gie_primary_processing_done_buf_prob (GstPad * pad, GstPadProbeInfo * info,
   }
 
   // write_kitti_output (appCtx, batch_meta);
-  write_kitti_output (appCtx, batch_meta, buf);
+  kafka_kitti_output(appCtx, batch_meta, buf);
 
   return GST_PAD_PROBE_OK;
 }

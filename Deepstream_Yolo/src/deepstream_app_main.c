@@ -31,7 +31,7 @@
 //#include "analy.h"
 #define MAX_INSTANCES 128
 #define APP_TITLE "DeepStream"
-
+#include "rdkafka.h"
 #define DEFAULT_X_WINDOW_WIDTH 1920
 #define DEFAULT_X_WINDOW_HEIGHT 1080
 
@@ -603,6 +603,19 @@ overlay_graphics (AppCtx * appCtx, GstBuffer * buf,
           frame_meta_list, 0), display_meta);
   return TRUE;
 }
+static void dr_msg_cb(rd_kafka_t *rk,
+					  const rd_kafka_message_t *rkmessage, void *opaque){
+		if(rkmessage->err)
+			fprintf(stderr, "%% Message delivery failed: %s\n", 
+					rd_kafka_err2str(rkmessage->err));
+		else
+			fprintf(stderr,
+                        "%% Message delivered (%zd bytes, "
+                        "partition %"PRId32")\n",
+                        rkmessage->len, rkmessage->partition); 
+       // rkmessage被librdkafka自动销毁
+	   
+}
 
 int
 main (int argc, char *argv[])
@@ -611,7 +624,7 @@ main (int argc, char *argv[])
   GOptionGroup *group = NULL;
   GError *error = NULL;
   guint i;
-
+  
   ctx = g_option_context_new ("Nvidia DeepStream Demo");
   group = g_option_group_new ("abc", NULL, NULL, NULL, NULL);
   g_option_group_add_entries (group, entries);
@@ -653,7 +666,11 @@ main (int argc, char *argv[])
     return_value = -1;
     goto done;
   }
-
+   
+   
+	
+		
+   
   for (i = 0; i < num_instances; i++) {
     appCtx[i] = g_malloc0 (sizeof (AppCtx));
     appCtx[i]->person_class_id = -1;
@@ -675,6 +692,41 @@ main (int argc, char *argv[])
       appCtx[i]->return_value = -1;
       goto done;
     }
+	
+	 char errstr[512];          
+		//char buf[512];               
+    appCtx[i]->brokers = "localhost:9092";
+    appCtx[i]->topic = "ads-deepstream-test";
+   
+   
+	
+	appCtx[i]->conf = rd_kafka_conf_new();
+
+	if (rd_kafka_conf_set(appCtx[i]->conf, "bootstrap.servers", appCtx[i]->brokers, errstr,
+					sizeof(errstr)) != RD_KAFKA_CONF_OK){
+			fprintf(stderr, "%s\n", errstr);
+			return 1;
+	}
+
+	
+	rd_kafka_conf_set_dr_msg_cb(appCtx[i]->conf, dr_msg_cb);
+
+		
+	appCtx[i]->rk = rd_kafka_new(RD_KAFKA_PRODUCER, appCtx[i]->conf, errstr, sizeof(errstr));
+		if(!appCtx[i]->rk){
+			fprintf(stderr, "%% Failed to create new producer:%s\n", errstr);
+			return 1;
+		}
+
+		
+	appCtx[i]->rkt = rd_kafka_topic_new(appCtx[i]->rk, appCtx[i]->topic, NULL);
+		if (!appCtx[i]->rkt){
+			fprintf(stderr, "%% Failed to create topic object: %s\n", 
+					rd_kafka_err2str(rd_kafka_last_error()));
+			rd_kafka_destroy(appCtx[i]->rk);
+			return 1;
+		} 
+	
   }
 
   for (i = 0; i < num_instances; i++) {
