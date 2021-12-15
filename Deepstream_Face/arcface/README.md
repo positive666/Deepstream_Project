@@ -1,3 +1,16 @@
+# make embeddings and gen tensorrt engine file 
+
+``
+mkdir build && cd build
+cmake ..
+make 
+./arcface-mobilefacenet -s  xxx.wts
+
+```
+
+
+
+
 # ArcFace MXNet Symbol=>ONNX=>TensorRT
 
 ## 1.Reference
@@ -12,7 +25,7 @@ python3 export_onnx.py --input_shape 4 3 112 112
 ```
 
 ## 3.Build arcface_trt Project
-```
+``
 mkdir build && cd build
 cmake ..
 make -j
