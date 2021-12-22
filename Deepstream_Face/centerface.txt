@@ -62,7 +62,7 @@ gpu-id=0
 #net-scale-factor=0.0039215697906911373
 net-scale-factor=1.0
 #0=RGB, 1=BGR
-model-color-format=0
+model-color-format=1
 force-implicit-batch-dim=1
 #custom-network-config=yolov3.cfg
 #model-file=yolov3.weights

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018-2019, NVIDIA CORPORATION. All rights reserved.
+ * Copyright (c) 2018-2020, NVIDIA CORPORATION. All rights reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -23,25 +23,37 @@
 #include "deepstream_app.h"
 #include "deepstream_config_file_parser.h"
 #include "nvds_version.h"
-#include <string.h>
+
+#include "json.hpp"
 #include <unistd.h>
 #include <termios.h>
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
-#include<time.h>
+#include <fstream>
+#include <string>
+//#include "analy.h"
 #define MAX_INSTANCES 128
 #define APP_TITLE "DeepStream"
 
 #define DEFAULT_X_WINDOW_WIDTH 1920
 #define DEFAULT_X_WINDOW_HEIGHT 1080
+using json = nlohmann::json;
+typedef enum
+{
+    APP_CONFIG_ANALYTICS_MODELS_UNKNOWN = 0,
+    APP_CONFIG_ANALYTICS_RESNET_PGIE_3SGIE_TYPE_COLOR_MAKE = 1,
+} AppConfigAnalyticsModel;
 
 AppCtx *appCtx[MAX_INSTANCES];
 static guint cintr = FALSE;
 static GMainLoop *main_loop = NULL;
 static gchar **cfg_files = NULL;
 static gchar **input_files = NULL;
+static gchar **override_cfg_file = NULL;
 static gboolean print_version = FALSE;
-static gboolean show_bbox_text = FALSE;
+static gboolean playback_utc = TRUE;
+static gboolean show_bbox_text = TRUE;
+static gboolean force_tcp = TRUE;
 static gboolean print_dependencies_version = FALSE;
 static gboolean quit = FALSE;
 static gint return_value = 0;
@@ -50,37 +62,66 @@ static guint num_input_files;
 static GMutex fps_lock;
 static gdouble fps[MAX_SOURCE_BINS];
 static gdouble fps_avg[MAX_SOURCE_BINS];
-static guint num_fps_inst = 0;
 
 static Display *display = NULL;
 static Window windows[MAX_INSTANCES] = { 0 };
 
-static gint source_ids[MAX_INSTANCES];
-
 static GThread *x_event_thread = NULL;
 static GMutex disp_lock;
 
+static guint rrow, rcol, rcfg;
+static gboolean rrowsel = FALSE, selecting = FALSE;
+static AppConfigAnalyticsModel model_used = APP_CONFIG_ANALYTICS_MODELS_UNKNOWN;
 
+
+
+#define PERSON_ID 0
+
+#ifdef EN_DEBUG
+#define LOGD(...) printf(__VA_ARGS__)
+#else
+#define LOGD(...)
+#endif
+
+//static TestAppCtx *testAppCtx;
 GST_DEBUG_CATEGORY (NVDS_APP);
 
+
+
+/** @} imported from deepstream-app as is */
 GOptionEntry entries[] = {
-  {"version", 'v', 0, G_OPTION_ARG_NONE, &print_version,
-      "Print DeepStreamSDK version", NULL}
-  ,
-  {"tiledtext", 't', 0, G_OPTION_ARG_NONE, &show_bbox_text,
-      "Display Bounding box labels in tiled mode", NULL}
-  ,
-  {"version-all", 0, 0, G_OPTION_ARG_NONE, &print_dependencies_version,
-      "Print DeepStreamSDK and dependencies version", NULL}
-  ,
-  {"cfg-file", 'c', 0, G_OPTION_ARG_FILENAME_ARRAY, &cfg_files,
-      "Set the config file", NULL}
-  ,
-  {"input-file", 'i', 0, G_OPTION_ARG_FILENAME_ARRAY, &input_files,
-      "Set the input file", NULL}
-  ,
-  {NULL}
-  ,
+    {"version", 'v', 0, G_OPTION_ARG_NONE, &print_version,
+	"Print DeepStreamSDK version", NULL}
+    ,
+	{"tiledtext", 't', 0, G_OPTION_ARG_NONE, &show_bbox_text,
+	    "Display Bounding box labels in tiled mode", NULL}
+    ,
+	{"version-all", 0, 0, G_OPTION_ARG_NONE, &print_dependencies_version,
+	    "Print DeepStreamSDK and dependencies version", NULL}
+    ,
+	{"cfg-file", 'c', 0, G_OPTION_ARG_FILENAME_ARRAY, &cfg_files,
+	    "Set the config file", NULL}
+    ,
+	{"override-cfg-file", 'o', 0, G_OPTION_ARG_FILENAME_ARRAY, &override_cfg_file,
+	    "Set the override config file, used for on-the-fly model update feature",
+	    NULL}
+    ,
+	{"input-file", 'i', 0, G_OPTION_ARG_FILENAME_ARRAY, &input_files,
+	    "Set the input file", NULL}
+    ,
+	{"playback-utc", 'p', 0, G_OPTION_ARG_INT, &playback_utc,
+	    "Playback utc; default=true (base UTC from file/rtsp URL); =false (base UTC from file-URL or RTCP Sender Report)",
+	    NULL}
+    ,
+	{"pgie-model-used", 'm', 0, G_OPTION_ARG_INT, &model_used,
+	    "PGIE Model used; {0 - Unknown [DEFAULT]}, {1: Resnet 4-class [Car, Bicycle, Person, Roadsign]}",
+	    NULL}
+    ,
+	{"no-force-tcp", 0, G_OPTION_FLAG_REVERSE, G_OPTION_ARG_NONE, &force_tcp,
+	    "Do not force TCP for RTP transport", NULL}
+    ,
+	{NULL}
+    ,
 };
 
 /**
@@ -110,6 +151,7 @@ all_bbox_generated (AppCtx * appCtx, GstBuffer * buf,
           (gint) appCtx->config.primary_gie_config.unique_id) {
         if (obj->class_id >= 0 && obj->class_id < 128) {
           num_objects[obj->class_id]++;
+		  //g_print("obj->class_id:",obj->class_id);
         }
         if (appCtx->person_class_id > -1
             && obj->class_id == appCtx->person_class_id) {
@@ -127,6 +169,29 @@ all_bbox_generated (AppCtx * appCtx, GstBuffer * buf,
     }
   }
 }
+ 
+
+
+/* static void all_bbox_generated(AppCtx *appCtx, GstBuffer *buf, NvDsBatchMeta *batch_meta, guint index) {
+    // TODO: handle generally
+	//std::cout<<"aa检查111111111111111:"<<appCtx->predNames.size()<<std::endl;
+	//std::cout<<"aaaaaaaaaaaaa检查2222222222222:"<<appCtx->predSims.size()<<std::endl;
+    guint i = 0;
+    for (NvDsMetaList *l_frame = batch_meta->frame_meta_list; l_frame != NULL; l_frame = l_frame->next) {
+        NvDsFrameMeta *frame_meta = (NvDsFrameMeta *)l_frame->data;
+        for (NvDsMetaList *l_obj = frame_meta->obj_meta_list; l_obj != NULL; l_obj = l_obj->next) {
+            NvDsObjectMeta *obj = (NvDsObjectMeta *)l_obj->data;
+            std::string str = appCtx->predNames[i];
+           // g_print("%s\n", str.c_str());
+		 
+            strcpy(obj->text_params.display_text, str.c_str());
+            i++;
+        }
+    }
+} */
+
+
+
 
 /**
  * Function to handle program interrupt signal.
@@ -156,29 +221,16 @@ perf_cb (gpointer context, NvDsAppPerfStruct * str)
   static guint header_print_cnt = 0;
   guint i;
   AppCtx *appCtx = (AppCtx *) context;
-  guint numf = (num_instances == 1) ? str->num_instances : num_instances;
+  guint numf = str->num_instances;
 
   g_mutex_lock (&fps_lock);
-  if (num_instances > 1) {
-    fps[appCtx->index] = str->fps[0];
-    fps_avg[appCtx->index] = str->fps_avg[0];
-  } else {
-    for (i = 0; i < numf; i++) {
-      fps[i] = str->fps[i];
-      fps_avg[i] = str->fps_avg[i];
-    }
+  for (i = 0; i < numf; i++) {
+    fps[i] = str->fps[i];
+    fps_avg[i] = str->fps_avg[i];
   }
-
-  num_fps_inst++;
-  if (num_fps_inst < num_instances) {
-    g_mutex_unlock (&fps_lock);
-    return;
-  }
-
-  num_fps_inst = 0;
 
   if (header_print_cnt % 20 == 0) {
-    g_print ("\n**PERF: ");
+    g_print ("\n**PERF:  ");
     for (i = 0; i < numf; i++) {
       g_print ("FPS %d (Avg)\t", i);
     }
@@ -186,7 +238,11 @@ perf_cb (gpointer context, NvDsAppPerfStruct * str)
     header_print_cnt = 0;
   }
   header_print_cnt++;
-  g_print ("**PERF: ");
+  if (num_instances > 1)
+    g_print ("PERF(%d): ", appCtx->index);
+  else
+    g_print ("**PERF:  ");
+
   for (i = 0; i < numf; i++) {
     g_print ("%.2f (%.2f)\t", fps[i], fps_avg[i]);
   }
@@ -280,9 +336,6 @@ print_runtime_commands (void)
   }
 }
 
-static guint rrow, rcol;
-static gboolean rrowsel = FALSE, selecting = FALSE;
-
 /**
  * Loop function to check keyboard inputs and status of each pipeline.
  */
@@ -312,14 +365,14 @@ event_thread_func (gpointer arg)
   g_print ("\n");
 
   gint source_id;
-  GstElement *tiler = appCtx[0]->pipeline.tiled_display_bin.tiler;
+  GstElement *tiler = appCtx[rcfg]->pipeline.tiled_display_bin.tiler;
   g_object_get (G_OBJECT (tiler), "show-source", &source_id, NULL);
 
   if (selecting) {
     if (rrowsel == FALSE) {
       if (c >= '0' && c <= '9') {
         rrow = c - '0';
-        if (rrow < appCtx[0]->config.tiled_display_config.rows){
+        if (rrow < appCtx[rcfg]->config.tiled_display_config.rows){
           g_print ("--selecting source  row %d--\n", rrow);
           rrowsel = TRUE;
         }else{
@@ -328,18 +381,18 @@ event_thread_func (gpointer arg)
       }
     } else {
       if (c >= '0' && c <= '9') {
-        unsigned int tile_num_columns = appCtx[0]->config.tiled_display_config.columns;
+        unsigned int tile_num_columns = appCtx[rcfg]->config.tiled_display_config.columns;
         rcol = c - '0';
         if (rcol < tile_num_columns){
           selecting = FALSE;
           rrowsel = FALSE;
           source_id = tile_num_columns * rrow + rcol;
           g_print ("--selecting source  col %d sou=%d--\n", rcol, source_id);
-          if (source_id >= (gint) appCtx[0]->config.num_source_sub_bins) {
+          if (source_id >= (gint) appCtx[rcfg]->config.num_source_sub_bins) {
             source_id = -1;
           } else {
-            source_ids[0] = source_id;
-            appCtx[0]->show_bbox_text = TRUE;
+            appCtx[rcfg]->show_bbox_text = TRUE;
+            appCtx[rcfg]->active_source_index = source_id;
             g_object_set (G_OBJECT (tiler), "show-source", source_id, NULL);
           }
         }else{
@@ -365,16 +418,32 @@ event_thread_func (gpointer arg)
       g_main_loop_quit (main_loop);
       ret = FALSE;
       break;
+    case 'c':
+      if (selecting == FALSE && source_id == -1) {
+        g_print ("--selecting config file --\n");
+        c = fgetc (stdin);
+        if (c >= '0' && c <= '9') {
+          rcfg = c - '0';
+          if (rcfg < num_instances) {
+            g_print ("--selecting config  %d--\n", rcfg);
+          } else {
+            g_print ("--selected config file %d out of bound, reenter\n", rcfg);
+            rcfg = 0;
+          }
+        }
+      }
+      break;
     case 'z':
       if (source_id == -1 && selecting == FALSE) {
         g_print ("--selecting source --\n");
         selecting = TRUE;
       } else {
         if (!show_bbox_text)
-          appCtx[0]->show_bbox_text = FALSE;
+          appCtx[rcfg]->show_bbox_text = FALSE;
         g_object_set (G_OBJECT (tiler), "show-source", -1, NULL);
-        source_ids[0] = -1;
+        appCtx[rcfg]->active_source_index = -1;
         selecting = FALSE;
+        rcfg = 0;
         g_print ("--tiled mode --\n");
       }
       break;
@@ -385,16 +454,16 @@ event_thread_func (gpointer arg)
 }
 
 static int
-get_source_id_from_coordinates (float x_rel, float y_rel)
+get_source_id_from_coordinates (float x_rel, float y_rel, AppCtx *appCtx)
 {
-  int tile_num_rows = appCtx[0]->config.tiled_display_config.rows;
-  int tile_num_columns = appCtx[0]->config.tiled_display_config.columns;
+  int tile_num_rows = appCtx->config.tiled_display_config.rows;
+  int tile_num_columns = appCtx->config.tiled_display_config.columns;
 
   int source_id = (int) (x_rel * tile_num_columns);
   source_id += ((int) (y_rel * tile_num_rows)) * tile_num_columns;
 
   /* Don't allow clicks on empty tiles. */
-  if (source_id >= (gint) appCtx[0]->config.num_source_sub_bins)
+  if (source_id >= (gint) appCtx->config.num_source_sub_bins)
     source_id = -1;
 
   return source_id;
@@ -432,15 +501,15 @@ nvds_x_event_thread (gpointer data)
           if (ev.button == Button1 && source_id == -1) {
             source_id =
                 get_source_id_from_coordinates (ev.x * 1.0 / win_attr.width,
-                ev.y * 1.0 / win_attr.height);
+                ev.y * 1.0 / win_attr.height, appCtx[index]);
             if (source_id > -1) {
               g_object_set (G_OBJECT (tiler), "show-source", source_id, NULL);
-              source_ids[index] = source_id;
+              appCtx[index]->active_source_index = source_id;
               appCtx[index]->show_bbox_text = TRUE;
             }
           } else if (ev.button == Button3) {
             g_object_set (G_OBJECT (tiler), "show-source", -1, NULL);
-            source_ids[index] = -1;
+            appCtx[index]->active_source_index = -1;
             if (!show_bbox_text)
               appCtx[index]->show_bbox_text = FALSE;
           }
@@ -503,16 +572,17 @@ static gboolean
 overlay_graphics (AppCtx * appCtx, GstBuffer * buf,
     NvDsBatchMeta * batch_meta, guint index)
 {
-  if (source_ids[index] == -1)
+  int srcIndex = appCtx->active_source_index;
+  if (srcIndex == -1)
     return TRUE;
-
+ 
   NvDsFrameLatencyInfo *latency_info = NULL;
   NvDsDisplayMeta *display_meta =
       nvds_acquire_display_meta_from_pool (batch_meta);
 
   display_meta->num_labels = 1;
   display_meta->text_params[0].display_text = g_strdup_printf ("Source: %s",
-      appCtx->config.multi_source_config[source_ids[index]].uri);
+      appCtx->config.multi_source_config[srcIndex].uri);
 
   display_meta->text_params[0].y_offset = 20;
   display_meta->text_params[0].x_offset = 20;
@@ -547,32 +617,79 @@ overlay_graphics (AppCtx * appCtx, GstBuffer * buf,
       0, 0, 0, 1.0};
   }
 
-        nvds_add_display_meta_to_frame (nvds_get_nth_frame_meta (batch_meta->      //显示帧数据 图像数据 文字等
+  nvds_add_display_meta_to_frame (nvds_get_nth_frame_meta (batch_meta->
           frame_meta_list, 0), display_meta);
   return TRUE;
+}
+
+
+std::vector<std::string>  get_dict(std::string filename){
+	std::vector<std::string>  dict;
+	
+	std::ifstream infile(filename);
+	std::string number;
+	while(!infile.eof())
+  {
+    infile >> number;
+	//std::cout<<number<<std::endl;
+    dict.push_back(number);
+	infile.get(); // 读取最后的回车符
+	if(infile.peek() == '\n') break;
+  }
+    std::cout<<"读取字典结束"<<std::endl;
+		//std::cout<<"存储数组数量："<<dict<<std::endl;
+	//std::cout<<"first:"<< dict[dict.size()-1]<<"---and--- "<<dict[dict.size()-2]<<std::endl;
+	return dict;
+}
+
+static void dr_msg_cb(rd_kafka_t *rk,
+					  const rd_kafka_message_t *rkmessage, void *opaque){
+		if(rkmessage->err)
+			fprintf(stderr, "%% Message delivery failed: %s\n", 
+					rd_kafka_err2str(rkmessage->err));
+		else
+			fprintf(stderr,
+                        "%% Message delivered (%zd bytes, "    // C++11 requires a space between literal and string macro, 文字上的无效后缀; C ++ 11需要文字和标识符之间的空格”
+                        "partition %" PRId32 ")\n",
+                        rkmessage->len, rkmessage->partition); 
+       // rkmessage被librdkafka自动销毁
+	   
 }
 
 int
 main (int argc, char *argv[])
 {
-  GOptionContext *ctx = NULL;
-  GOptionGroup *group = NULL;
-  GError *error = NULL;
-  guint i;
-  clock_t t_start; 
-	clock_t t_end;
-	clock_t t_end2;
-	clock_t t_end3;
-	t_start = clock(); 
-      
-  ctx = g_option_context_new ("Nvidia DeepStream Demo");
-  group = g_option_group_new ("abc", NULL, NULL, NULL, NULL);
-  g_option_group_add_entries (group, entries);
+    g_print("[INFO] Loading config...\n");
+	
+    std::ifstream is("./config.json");
+    json config;
+    is >> config;
+    is.close();
+    is.clear();
+    g_print("[INFO] Reading key from file...\n");
+   
+    std::string kafka_message=(config["kafka_message"]);
+	std::string kafka_topic=(config["kafka_topic"]);
 
-  g_option_context_set_main_group (ctx, group);
-  g_option_context_add_group (ctx, gst_init_get_option_group ());
+    int outputDim = config["rec_outputDim"];
+    
+  
+	
+    int maxFacesPerScene = config["det_maxFacesPerScene"]; 
+	
+	GOptionContext *ctx = NULL;
+	GOptionGroup *group = NULL;
+	GError *error = NULL;
+	guint i;
 
-  GST_DEBUG_CATEGORY_INIT (NVDS_APP, "NVDS_APP", 0, NULL);
+	ctx = g_option_context_new ("Nvidia DeepStream Demo");
+	group = g_option_group_new ("abc", NULL, NULL, NULL, NULL);
+	g_option_group_add_entries (group, entries);
+
+	g_option_context_set_main_group (ctx, group);
+	g_option_context_add_group (ctx, gst_init_get_option_group ());
+
+    GST_DEBUG_CATEGORY_INIT (NVDS_APP, "NVDS_APP", 0, NULL);
 
   if (!g_option_context_parse (ctx, &argc, &argv, &error)) {
     NVGSTDS_ERR_MSG_V ("%s", error->message);
@@ -580,15 +697,15 @@ main (int argc, char *argv[])
   }
 
   if (print_version) {
-    g_print ("deepstream-app version %d.%d\n",
-        NVDS_APP_VERSION_MAJOR, NVDS_APP_VERSION_MINOR);
+    g_print ("deepstream-app version %d.%d.%d\n",
+        NVDS_APP_VERSION_MAJOR, NVDS_APP_VERSION_MINOR, NVDS_APP_VERSION_MICRO);
     nvds_version_print ();
     return 0;
   }
 
   if (print_dependencies_version) {
-    g_print ("deepstream-app version %d.%d\n",
-        NVDS_APP_VERSION_MAJOR, NVDS_APP_VERSION_MINOR);
+    g_print ("deepstream-app version %d.%d.%d\n",
+        NVDS_APP_VERSION_MAJOR, NVDS_APP_VERSION_MINOR, NVDS_APP_VERSION_MICRO);
     nvds_version_print ();
     nvds_dependencies_version_print ();
     return 0;
@@ -596,13 +713,10 @@ main (int argc, char *argv[])
 
   if (cfg_files) {
     num_instances = g_strv_length (cfg_files);
-	g_print ("!!!!!!!!!!!!@@@@@@@@@@@@@@@@@App num_instances: %d\n",num_instances);
   }
   if (input_files) {
     num_input_files = g_strv_length (input_files);
   }
-
-  memset (source_ids, -1, sizeof (source_ids));
 
   if (!cfg_files || num_instances == 0) {
     NVGSTDS_ERR_MSG_V ("Specify config file with -c option");
@@ -612,9 +726,10 @@ main (int argc, char *argv[])
 
   for (i = 0; i < num_instances; i++) {
     appCtx[i] = g_malloc0 (sizeof (AppCtx));
-    appCtx[i]->person_class_id = -1;
-    appCtx[i]->car_class_id = -1;
+   // appCtx[i]->person_class_id = -1;
+   // appCtx[i]->car_class_id = -1;
     appCtx[i]->index = i;
+    appCtx[i]->active_source_index = -1;
     if (show_bbox_text) {
       appCtx[i]->show_bbox_text = TRUE;
     }
@@ -630,10 +745,47 @@ main (int argc, char *argv[])
       appCtx[i]->return_value = -1;
       goto done;
     }
-  }
+       // Init context 
+       // Init context 
+     
+    appCtx[i]->sgieOutputDim = outputDim;
+    appCtx[i]->rec_output_W=config["rec_output_W"];
+    appCtx[i]->Dict=get_dict(config["input_Dict"]);
+    std::cout<<"check dice size:"<<appCtx[i]->Dict.size()<<std::endl;
+	// Init Global Kafka	  
+	char errstr[512];       
+    appCtx[i]->brokers = kafka_message.c_str();
+    appCtx[i]->topic = kafka_topic.c_str();
+	appCtx[i]->conf = rd_kafka_conf_new();
+	if (rd_kafka_conf_set(appCtx[i]->conf, "bootstrap.servers", appCtx[i]->brokers, errstr,
+					sizeof(errstr)) != RD_KAFKA_CONF_OK){
+			fprintf(stderr, "%s\n", errstr);
+			return 1;
+	}
+
 	
+	rd_kafka_conf_set_dr_msg_cb(appCtx[i]->conf, dr_msg_cb);
+
+		
+	appCtx[i]->rk = rd_kafka_new(RD_KAFKA_PRODUCER, appCtx[i]->conf, errstr, sizeof(errstr));
+		if(!appCtx[i]->rk){
+			fprintf(stderr, "%% Failed to create new producer:%s\n", errstr);
+			return 1;
+		}
+
+		
+	appCtx[i]->rkt = rd_kafka_topic_new(appCtx[i]->rk, appCtx[i]->topic, NULL);
+		if (!appCtx[i]->rkt){
+			fprintf(stderr, "%% Failed to create topic object: %s\n", 
+					rd_kafka_err2str(rd_kafka_last_error()));
+			rd_kafka_destroy(appCtx[i]->rk);
+			return 1;
+		}		
+	std::cout<<"create kafka successful\n";	
+
+  }
+
   for (i = 0; i < num_instances; i++) {
-	  
     if (!create_pipeline (appCtx[i], NULL,
             all_bbox_generated, perf_cb, overlay_graphics)) {
       NVGSTDS_ERR_MSG_V ("Failed to create pipeline");
@@ -641,15 +793,7 @@ main (int argc, char *argv[])
       goto done;
     }
   }
-	
-	
-	 t_end2 = clock();
-	  clock_t t2 = t_end2 - t_start;
-      double time_taken2 = ((double)t2)/CLOCKS_PER_SEC; // in seconds 
-      
-      g_print("\ncreate pipeline took %.2f seconds \n", time_taken2);
-	
-	
+
   main_loop = g_main_loop_new (NULL, FALSE);
 
   _intr_setup ();
@@ -675,6 +819,7 @@ main (int argc, char *argv[])
       XTextProperty xproperty;
       gchar *title;
       guint width, height;
+      XSizeHints hints = {0};
 
       if (!GST_IS_VIDEO_OVERLAY (appCtx[i]->pipeline.instance_bins[0].
               sink_bin.sub_bins[j].sink)) {
@@ -702,13 +847,21 @@ main (int argc, char *argv[])
       width = (width) ? width : DEFAULT_X_WINDOW_WIDTH;
       height = (height) ? height : DEFAULT_X_WINDOW_HEIGHT;
 
+      hints.flags = PPosition | PSize;
+      hints.x = appCtx[i]->config.sink_bin_sub_bin_config[j].render_config.offset_x;
+      hints.y = appCtx[i]->config.sink_bin_sub_bin_config[j].render_config.offset_y;
+      hints.width = width;
+      hints.height = height;
+
       windows[i] =
           XCreateSimpleWindow (display, RootWindow (display,
-              DefaultScreen (display)), 0, 0, width, height, 2, 0x00000000,
-          0x00000000);
+              DefaultScreen (display)), hints.x, hints.y, width, height, 2,
+              0x00000000, 0x00000000);
+
+      XSetNormalHints(display, windows[i], &hints);
 
       if (num_instances > 1)
-        title = g_strdup_printf (title, APP_TITLE "-%d", i);
+        title = g_strdup_printf (APP_TITLE "-%d", i);
       else
         title = g_strdup (APP_TITLE);
       if (XStringListToTextProperty ((char **) &title, 1, &xproperty) != 0) {
@@ -745,12 +898,6 @@ main (int argc, char *argv[])
     }
   }
 
-	t_end3 = clock();
-	  clock_t t3 = t_end3 - t_start;
-      double time_taken3 = ((double)t3)/CLOCKS_PER_SEC; // in seconds 
-      
-      g_print("\n@@@@@@  what took %.2f seconds \n", time_taken3);
-
   /* Dont try to set playing state if error is observed */
   if (return_value != -1) {
     for (i = 0; i < num_instances; i++) {
@@ -786,6 +933,11 @@ done:
       XDestroyWindow (display, windows[i]);
     windows[i] = 0;
     g_mutex_unlock (&disp_lock);
+	// Destroy topic object  
+    rd_kafka_topic_destroy(appCtx[i]->rkt);  
+    
+    // Destroy the producer instance  
+     rd_kafka_destroy(appCtx[i]->rk);   
 
     g_free (appCtx[i]);
   }
@@ -806,17 +958,11 @@ done:
   }
 
   if (return_value == 0) {
-	  t_end = clock();
-	  clock_t t = t_end - t_start;
-      double time_taken = ((double)t)/CLOCKS_PER_SEC; // in seconds 
-      
-      g_print("\nThe program took %.2f seconds \n", time_taken); 
-    g_print ("App run successful \n");
-	
+    g_print ("App run successful\n");
   } else {
     g_print ("App run failed\n");
   }
-	
+
   gst_deinit ();
 
   return return_value;

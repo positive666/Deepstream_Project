@@ -509,13 +509,14 @@ write_kitti_output (AppCtx * appCtx, NvDsBatchMeta * batch_meta, GstBuffer *buff
      /*rd_kafka_flush是rd_kafka_poll()的抽象化，
      等待所有未完成的produce请求完成，通常在销毁producer实例前完成
      以确保所有排列中和正在传输的produce请求在销毁前完成*/
-    rd_kafka_flush(appCtx->rk, 10);
+    rd_kafka_flush(appCtx->rk, 1);
 
   
      //将JSON结构所占用的数据空间释放
     
 	
 	free(buf);
+	cJSON_Delete(root);
    // fclose (bbox_params_dump_file);
 	
   }
@@ -738,7 +739,7 @@ write_kitti_kafka_output (AppCtx * appCtx, NvDsBatchMeta * batch_meta,std::vecto
     int index_count=0;
     cJSON *root = cJSON_CreateArray();
 		/*用于中断的信号*/
-	signal(SIGINT, stop);
+	
     for (NvDsMetaList * l_frame = batch_meta->frame_meta_list; l_frame != NULL;
       l_frame = l_frame->next) {
     NvDsFrameMeta *frame_meta = l_frame->data;
@@ -831,7 +832,7 @@ write_kitti_kafka_output (AppCtx * appCtx, NvDsBatchMeta * batch_meta,std::vecto
         index_count++;
     }
 }
- 
+    signal(SIGINT, stop);
 	char *json_data = NULL;
     printf("data:%s\n",json_data = cJSON_Print(root));
 	
@@ -896,7 +897,7 @@ write_kitti_kafka_output (AppCtx * appCtx, NvDsBatchMeta * batch_meta,std::vecto
      /*rd_kafka_flush是rd_kafka_poll()的抽象化，
      等待所有未完成的produce请求完成，通常在销毁producer实例前完成
      以确保所有排列中和正在传输的produce请求在销毁前完成*/
-    rd_kafka_flush(appCtx->rk, 10*1000);
+    rd_kafka_flush(appCtx->rk, 1);
      //将JSON结构所占用的数据空间释放
 	free(json_data);
     free(buf);
@@ -1348,7 +1349,7 @@ analytics_done_buf_prob (GstPad * pad, GstPadProbeInfo * info, gpointer u_data)
 		for(int i=0;i<feature.rows;i++){
 			cv::Mat fea1 ;
 			fea1=feature.row(i);
-			cv::Mat fea1_norm(1,128,CV_32FC1);
+			cv::Mat fea1_norm(1,appCtx->sgieOutputDim,CV_32FC1);
 			cv::normalize(fea1, fea1_norm);
 			int find_num=0;
 		    std::vector<float> score_save;
@@ -1378,7 +1379,7 @@ analytics_done_buf_prob (GstPad * pad, GstPadProbeInfo * info, gpointer u_data)
 			}
 		    std::vector<float>::iterator biggest =std::max_element(score_save.begin(),score_save.end());
 		   
-			if(*biggest>0.6)
+			if(*biggest>0.601)
 			{   
 			    int pos=std::distance(std::begin(score_save), biggest);
 				std::cout<<"相似度:"<<*biggest<<"匹配该特征样本ID"<<appCtx->knownIds[pos]<<std::endl;
@@ -1388,7 +1389,7 @@ analytics_done_buf_prob (GstPad * pad, GstPadProbeInfo * info, gpointer u_data)
 				
 			}
 			else  {
-				std::cout<<find_num<<"次没找到"<<std::endl;
+				//std::cout<<find_num<<"次没找到"<<std::endl;
 			    appCtx->predNames.push_back("未知人物");
 				appCtx->predSims.push_back(*biggest);
 			
@@ -1432,17 +1433,17 @@ analytics_done_buf_prob (GstPad * pad, GstPadProbeInfo * info, gpointer u_data)
 				std::cout<<"未找到！！！！！！！！"<<std::endl;
 			} */
 		//} 
-	
+	   if(appCtx->send_mess)
         write_kitti_kafka_output(appCtx, batch_meta,appCtx->predNames,appCtx->predSims);
         //appCtx->cossim->calculate(appCtx->embeds, appCtx->embedCount, sims);
 		//std::cout<<appCtx->predNames[0]<<std::endl;
        // get_outputs(appCtx, similarity, appCtx->predNames, appCtx->predSims);
 	   
-	    std::cout<<"完成"<<appCtx->embedCount<<std::endl;
+	    //std::cout<<"完成"<<appCtx->embedCount<<std::endl;
 	  /*  if (appCtx->bbox_generated_post_analytics_cb) {
         appCtx->bbox_generated_post_analytics_cb(appCtx, buf, batch_meta, index);
     }  */
-       //  return GST_PAD_PROBE_OK;
+       // return GST_PAD_PROBE_OK;
 	   
     }
 	

@@ -62,7 +62,7 @@ LIBS+= -L$(LIB_INSTALL_DIR) -lnvdsgst_meta -lnvds_meta -lnvdsgst_helper \
 	   -lnvdsgst_smartrecord -lnvds_utils -lnvds_msgbroker -lm \
        -lopencv_core -lopencv_imgproc -lopencv_highgui -lopencv_ml \
        -lcuda -lgstrtspserver-1.0 -ldl -Wl,-rpath,$(LIB_INSTALL_DIR) 
-LIBS+=/home/project/install/faiss-master/libfaiss.a  
+#LIBS+=/home/project/install/faiss-master/libfaiss.a  
 CFLAGS+= $(shell pkg-config --cflags $(PKGS))
 
 LIBS+= $(shell pkg-config --libs $(PKGS))

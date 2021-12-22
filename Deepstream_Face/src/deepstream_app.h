@@ -29,7 +29,7 @@ extern "C"
 //#endif
 #include "cosine_similarity.h"
 #include <string.h>
-
+#include <iostream>
 #include <gst/gst.h>
 #include <stdio.h>
 #include <vector>
@@ -177,7 +177,7 @@ struct _AppCtx
   const char *brokers;   /* Argument: broker list */
   const char *topic;     /* Argument: topic to produce to */
   rd_kafka_topic_t *rkt;
-  
+  bool send_mess;
 };
 
 /**

@@ -578,7 +578,7 @@ overlay_graphics (AppCtx * appCtx, GstBuffer * buf,
   int srcIndex = appCtx->active_source_index;
   if (srcIndex == -1)
     return TRUE;
-  std::cout<<"overlay_graphics!xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"<<std::endl;
+ // std::cout<<"overlay_graphics!xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"<<std::endl;
   NvDsFrameLatencyInfo *latency_info = NULL;
   NvDsDisplayMeta *display_meta =
       nvds_acquire_display_meta_from_pool (batch_meta);
@@ -653,13 +653,16 @@ main (int argc, char *argv[])
 	g_print("[INFO] features numbers:\n",numImages);
     std::string kafka_message=(config["kafka_message"]);
 	std::string kafka_topic=(config["kafka_topic"]);
+	bool kafka_flag=config["send_mess"];
+	if (kafka_flag)
+		 g_print("[INFO] start kafka send_message sucessfully..\n");
      // std::string numImages_str;
      // std::getline(is, numImages_str);
      // unsigned int numImages = std::stoi(numImages_str);
 	 //int numImages=30;
      //std::cout<<"读取33333333333！！！！！！！！！！！！！！"<<numImages<<std::endl;
-     is.close();
-     is.clear();
+     /* is.close();
+     is.clear(); */
      g_print("[INFO] Reading embeddings from file...\n");
      is.open(config["input_embeddingsFile"]);
      json j;
@@ -695,7 +698,7 @@ main (int argc, char *argv[])
     //std::cout<<"遍历存取的数："<<savex.size()<<std::endl;
     //for(auto i:savex)
 	   //std::cout<<i<<std::endl;
-    std::cout<<"读取的特征数量:"<<knownEmbedCount<<std::endl; 		 
+    std::cout<<"已经加载特征库，读取的特征数量:"<<knownEmbedCount<<std::endl; 		 
 	
     int maxFacesPerScene = config["det_maxFacesPerScene"];
 	
@@ -751,6 +754,7 @@ main (int argc, char *argv[])
    // appCtx[i]->person_class_id = -1;
    // appCtx[i]->car_class_id = -1;
     appCtx[i]->index = i;
+	
     appCtx[i]->active_source_index = -1;
     if (show_bbox_text) {
       appCtx[i]->show_bbox_text = TRUE;
@@ -772,7 +776,7 @@ main (int argc, char *argv[])
     appCtx[i]->embeds = new float[maxFacesPerScene * outputDim];
     appCtx[i]->sgieOutputDim = outputDim;
     appCtx[i]->knownEmbedCount = knownEmbedCount;
-          
+    appCtx[i]->send_mess=kafka_flag;      
           //cossim.init(knownEmbeds, knownEmbedCount, outputDim);
 	appCtx[i]->save_embeds=knownEmbeds;
          // appCtx[i]->cossim = &cossim;

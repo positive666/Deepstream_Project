@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018-2019, NVIDIA CORPORATION. All rights reserved.
+ * Copyright (c) 2018-2020, NVIDIA CORPORATION. All rights reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -19,44 +19,63 @@
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
  */
-
+#include <algorithm>
 #include <gst/gst.h>
 #include <string.h>
 #include <math.h>
 #include <stdlib.h>
-
+#include <time.h>
+#include <cstring>
+// #include <curl.h>
+// #include <json-glib.h>
+#include <glib-object.h>
+#include <json-glib/json-glib.h>
+#include "cJSON.h"
+#include <assert.h>
+#include <opencv2/opencv.hpp>
+#include "rdkafka.h"
 #include "deepstream_app.h"
 
+/* #include <faiss/index_io.h>
+#include <faiss/IndexHNSW.h>
+#include <faiss/MetaIndexes.h>
+#include <faiss/IndexFlat.h>
+#include <faiss/IndexIVFPQ.h> */
 #define MAX_DISPLAY_LEN 128
 static guint batch_num = 0;
-int frame_number=0;
+static guint demux_batch_num = 0;
+
 GST_DEBUG_CATEGORY_EXTERN (NVDS_APP);
 
 GQuark _dsmeta_quark;
 
 #define CEIL(a,b) ((a + b - 1) / b)
-#define SOURCE_RESET_INTERVAL_IN_MS 60000
 
 /**
- * Function called at regular interval when one of NV_DS_SOURCE_RTSP type
- * source in the pipeline is down / disconnected. This function try to
- * reconnect the source by resetting that source pipeline.
+ * @brief  Add the (nvmsgconv->nvmsgbroker) sink-bin to the
+ *         overall DS pipeline (if any configured) and link the same to
+ *         common_elements.tee (This tee connects
+ *         the common analytics path to Tiler/display-sink and
+ *         to configured broker sink if any)
+ *         NOTE: This API shall return TRUE if there are no
+ *         broker sinks to add to pipeline
+ *
+ * @param  appCtx [IN]
+ * @return TRUE if succussful; FALSE otherwise
  */
-static gboolean
-watch_source_status (gpointer data)
-{
-  NvDsSrcBin *src_bin = (NvDsSrcBin *) data;
+static gboolean add_and_link_broker_sink (AppCtx * appCtx);
 
-  g_print ("watch_source_status %s\n", GST_ELEMENT_NAME(src_bin));
-  if (src_bin && src_bin->reconfiguring) {
-    // source is still not up, reconfigure it again.
-    g_timeout_add (20, reset_source_pipeline, src_bin);
-    return TRUE;
-  } else {
-    // source is reconfigured, remove call back.
-    return FALSE;
-  }
-}
+/**
+ * @brief  Checks if there are any [sink] groups
+ *         configured for source_id=provided source_id
+ *         NOTE: source_id key and this API is valid only when we
+ *         disable [tiler] and thus use demuxer for individual
+ *         stream out
+ * @param  config [IN] The DS Pipeline configuration struct
+ * @param  source_id [IN] Source ID for which a specific [sink]
+ *         group is searched for
+ */
+static gboolean is_sink_available_for_source_id(NvDsConfig *config, guint source_id);
 
 /**
  * callback function to receive messages from components
@@ -108,9 +127,18 @@ bus_callback (GstBus * bus, GstMessage * message, gpointer data)
       }
 
       NvDsSrcParentBin *bin = &appCtx->pipeline.multi_src_bin;
-      for (i = 0; i < bin->num_bins; i++) {
-        if (bin->sub_bins[i].src_elem == (GstElement *) GST_MESSAGE_SRC (message))
-          break;
+      GstElement *msg_src_elem = (GstElement *) GST_MESSAGE_SRC (message);
+      gboolean bin_found = FALSE;
+      /* Find the source bin which generated the error. */
+      while (msg_src_elem && !bin_found) {
+        for (i = 0; i < bin->num_bins && !bin_found; i++) {
+          if (bin->sub_bins[i].src_elem == msg_src_elem ||
+                  bin->sub_bins[i].bin == msg_src_elem) {
+            bin_found = TRUE;
+            break;
+          }
+        }
+        msg_src_elem = GST_ELEMENT_PARENT (msg_src_elem);
       }
 
       if ((i != bin->num_bins) &&
@@ -120,18 +148,22 @@ bus_callback (GstBus * bus, GstMessage * message, gpointer data)
 
         if (!subBin->reconfiguring ||
             g_strrstr(debuginfo, "500 (Internal Server Error)")) {
-          if (!subBin->reconfiguring) {
-            // Check status of stream at regular interval.
-            g_timeout_add (SOURCE_RESET_INTERVAL_IN_MS,
-                           watch_source_status, subBin);
-          }
-          // Reconfigure the stream.
           subBin->reconfiguring = TRUE;
-          g_timeout_add (20, reset_source_pipeline, subBin);
+          g_timeout_add (0, reset_source_pipeline, subBin);
         }
         g_error_free (error);
         g_free (debuginfo);
         return TRUE;
+      }
+
+      if (appCtx->config.multi_source_config[0].type == NV_DS_SOURCE_CAMERA_V4L2) {
+        if (g_strrstr(debuginfo, "reason not-negotiated (-4)")) {
+          NVGSTDS_INFO_MSG_V ("incorrect camera parameters provided, please provide supported resolution and frame rate\n");
+        }
+
+        if (g_strrstr(debuginfo, "Buffer pool activation failed")) {
+          NVGSTDS_INFO_MSG_V ("usb bandwidth might be saturated\n");
+        }
       }
 
       g_error_free (error);
@@ -194,90 +226,441 @@ bus_callback (GstBus * bus, GstMessage * message, gpointer data)
   return TRUE;
 }
 
-static GstBusSyncReply
-bus_sync_handler (GstBus * bus, GstMessage * msg, gpointer data)
-{
-  AppCtx *appCtx = (AppCtx *) data;
-
-  switch (GST_MESSAGE_TYPE (msg)) {
-    case GST_MESSAGE_ELEMENT:
-      if (GST_MESSAGE_SRC (msg) == GST_OBJECT (appCtx->pipeline.multi_src_bin.bin)) {
-        const GstStructure *structure;
-        structure = gst_message_get_structure (msg);
-
-       if (gst_structure_has_name (structure, "GstBinForwarded")) {
-          GstMessage *child_msg;
-
-          if (gst_structure_has_field (structure, "message")) {
-            const GValue *val = gst_structure_get_value (structure, "message");
-            if (G_VALUE_TYPE (val) == GST_TYPE_MESSAGE) {
-              child_msg = (GstMessage *) g_value_get_boxed (val);
-              if (GST_MESSAGE_TYPE(child_msg) == GST_MESSAGE_ASYNC_DONE) {
-                guint i = 0;
-                NvDsSrcParentBin *bin = &appCtx->pipeline.multi_src_bin;
-                GST_DEBUG ("num bins: %d, message src: %s\n", bin->num_bins,
-                           GST_MESSAGE_SRC_NAME(child_msg));
-                for (i = 0; i < bin->num_bins; i++) {
-                  if (bin->sub_bins[i].bin == (GstElement *) GST_MESSAGE_SRC (child_msg))
-                    break;
-                }
-
-                if (i != bin->num_bins) {
-                  NvDsSrcBin *subBin = &bin->sub_bins[i];
-                  if (subBin->reconfiguring &&
-                      appCtx->config.multi_source_config[0].type == NV_DS_SOURCE_RTSP)
-                    g_timeout_add (20, set_source_to_playing, subBin);
-                }
-              }
-            }
-          }
-        }
-      }
-      return GST_BUS_PASS;
-
-    default:
-      return GST_BUS_PASS;
-  }
-}
-
 /**
  * Function to dump bounding box data in kitti format. For this to work,
  * property "gie-kitti-output-dir" must be set in configuration file.
  * Data of different sources and frames is dumped in separate file.
  */
+// static void
+// write_kitti_output (AppCtx * appCtx, NvDsBatchMeta * batch_meta)
+// {
+//   gchar bbox_file[1024] = { 0 };
+//   FILE *bbox_params_dump_file = NULL;
+
+//   if (!appCtx->config.bbox_dir_path)
+//     return;
+
+//   for (NvDsMetaList * l_frame = batch_meta->frame_meta_list; l_frame != NULL;
+//       l_frame = l_frame->next) {
+//     NvDsFrameMeta *frame_meta = l_frame->data;
+//     guint stream_id = frame_meta->pad_index;
+//     g_snprintf (bbox_file, sizeof (bbox_file) - 1,
+//         "%s/%02u_%03u_%06lu.txt", appCtx->config.bbox_dir_path,
+//         appCtx->index, stream_id, (gulong) frame_meta->frame_num);
+//     bbox_params_dump_file = fopen (bbox_file, "w");
+//     if (!bbox_params_dump_file)
+//       continue;
+
+//     for (NvDsMetaList * l_obj = frame_meta->obj_meta_list; l_obj != NULL;
+//         l_obj = l_obj->next) {
+//       NvDsObjectMeta *obj = (NvDsObjectMeta *) l_obj->data;
+//       float left = obj->rect_params.left;
+//       float top = obj->rect_params.top;
+//       float right = left + obj->rect_params.width;
+//       float bottom = top + obj->rect_params.height;
+//       // Here confidence stores detection confidence, since dump gie output
+//       // is before tracker plugin
+//       float confidence = obj->confidence;
+//       fprintf (bbox_params_dump_file,
+//           "%s 0.0 0 0.0 %f %f %f %f 0.0 0.0 0.0 0.0 0.0 0.0 0.0 %f\n",
+//           obj->obj_label, left, top, right, bottom, confidence);
+//     }
+//     fclose (bbox_params_dump_file);
+//   }
+// }
+
+// static void curl_postjson(gchar label, float left, float top, float right, float bottom, float confidence, GstClockTime relativeTime, char* localTime, float areaProportion)
+// {
+//   // char szJsonData[1024];
+// 	// memset(szJsonData, 0, sizeof(szJsonData));
+//   // GString *string = g_string_new("{");
+//   JsonBuilder *builder = json_builder_new();
+//   json_builder_begin_object(builder);
+//   json_builder_set_member_name(builder, "array");
+//   json_builder_begin_array(builder);
+//   json_builder_begin_object(builder);
+//   json_builder_set_member_name(builder, "name");
+//   json_builder_add_string_value(builder, label);
+//   json_builder_end_object(builder);
+//   json_builder_end_array(builder);
+//   json_builder_end_object(builder);
+
+//   JsonNode *node = json_builder_get_root(builder);
+//   g_object_unref( builder);
+//   JsonGenerator *generator = json_generator_new();
+//   json_generator_set_root(generator, node);
+//   gchar *data = json_generator_to_data(generator, NULL);
+
+//   // try 
+// 	// {
+// 		CURL *pCurl = NULL;
+// 		CURLcode res;
+// 		// In windows, this will init the winsock stuff
+// 		curl_global_init(CURL_GLOBAL_ALL);
+ 
+// 		// get a curl handle
+// 		pCurl = curl_easy_init();
+// 		if (NULL != pCurl) 
+// 		{
+//       curl_easy_setopt(pCurl, CURLOPT_TIMEOUT, 1);
+//       curl_easy_setopt(pCurl, CURLOPT_TIMEOUT, 1);
+//       curl_easy_setopt(pCurl, CURLOPT_URL, "http://192.168.0.2/posttest.svc");
+//       struct curl_slist *plist = curl_slist_append(NULL, "Content-Type:application/json;charset=UTF-8");
+// 			curl_easy_setopt(pCurl, CURLOPT_HTTPHEADER, plist);
+//       // curl_easy_setopt(pCurl, CURLOPT_POSTFIELDS, szJsonData);
+//       curl_easy_setopt(pCurl, CURLOPT_POSTFIELDS, data);
+
+//       res = curl_easy_perform(pCurl);
+//       if (res != CURLE_OK) 
+// 			{
+// 				printf("curl_easy_perform() failed:%s\n", curl_easy_strerror(res));
+// 			}
+//       curl_easy_cleanup(pCurl);
+// 		}
+// 		curl_global_cleanup();
+// 	// }
+// 	// catch (std::exception &ex)
+// 	// {
+// 	// 	printf("curl exception %s.\n", ex.what());
+// 	// }
+
+//   json_node_free(node);
+//   g_object_unref(generator);
+//   free(data);
+
+// 	// strJson += "\"user_name\" : \"%s\",",label;
+// 	// // strJson += "\"password\" : \"test123\"";
+// 	// strJson += "}";
+//   // strcpy(szJsonData, strJson.c_str());
+
+  
+// 	return 0;
+// }
+
+static int run = 1;
+
+static void stop(int sig){
+	run = 0;
+	fclose(stdin);
+}
+
+/*
+    每条消息调用一次该回调函数，说明消息是传递成功(rkmessage->err == RD_KAFKA_RESP_ERR_NO_ERROR)
+    还是传递失败(rkmessage->err != RD_KAFKA_RESP_ERR_NO_ERROR)
+    该回调函数由rd_kafka_poll()触发，在应用程序的线程上执行
+ */
+static void dr_msg_cb(rd_kafka_t *rk,
+					  const rd_kafka_message_t *rkmessage, void *opaque){
+		if(rkmessage->err)
+			fprintf(stderr, "%% Message delivery failed: %s\n", 
+					rd_kafka_err2str(rkmessage->err));
+		else
+			fprintf(stderr,
+                        "%% Message delivered (%zd bytes, "
+                        "partition %"PRId32")\n",
+                        rkmessage->len, rkmessage->partition); 
+       // rkmessage被librdkafka自动销毁
+	   
+}
+
+
+
 static void
-write_kitti_output (AppCtx * appCtx, NvDsBatchMeta * batch_meta)
+write_kitti_output (AppCtx * appCtx, NvDsBatchMeta * batch_meta, GstBuffer *buffer)
 {
   gchar bbox_file[1024] = { 0 };
   FILE *bbox_params_dump_file = NULL;
 
-  if (!appCtx->config.bbox_dir_path)
-    return;
+  /*  if (!appCtx->config.bbox_dir_path)
+    return ;  */
+  //continue;
+        rd_kafka_t *rk;            /*Producer instance handle*/
+		rd_kafka_topic_t *rkt;     /*topic对象*/
+		rd_kafka_conf_t *conf;     /*临时配置对象*/
+		char errstr[512];          
+		//char buf[512];             
+		const char *brokers;       
+		const char *topic;         
+		brokers = "localhost:9092";
+		topic = "test";
+        int cous=0;
+		/* 创建一个kafka配置占位 */
+		conf = rd_kafka_conf_new();
 
+		/*创建broker集群*/
+		if (rd_kafka_conf_set(conf, "bootstrap.servers", brokers, errstr,
+					sizeof(errstr)) != RD_KAFKA_CONF_OK){
+			fprintf(stderr, "%s\n", errstr);
+			return 1;
+		}
+
+		/*设置发送报告回调函数，rd_kafka_produce()接收的每条消息都会调用一次该回调函数
+		 *应用程序需要定期调用rd_kafka_poll()来服务排队的发送报告回调函数*/
+		rd_kafka_conf_set_dr_msg_cb(conf, dr_msg_cb);
+
+		/*创建producer实例
+		  rd_kafka_new()获取conf对象的所有权,应用程序在此调用之后不得再次引用它*/
+		rk = rd_kafka_new(RD_KAFKA_PRODUCER, conf, errstr, sizeof(errstr));
+		if(!rk){
+			fprintf(stderr, "%% Failed to create new producer:%s\n", errstr);
+			return 1;
+		}
+
+		/*实例化一个或多个topics(`rd_kafka_topic_t`)来提供生产或消费，topic
+		对象保存topic特定的配置，并在内部填充所有可用分区和leader brokers，*/
+		rkt = rd_kafka_topic_new(rk, topic, NULL);
+		if (!rkt){
+			fprintf(stderr, "%% Failed to create topic object: %s\n", 
+					rd_kafka_err2str(rd_kafka_last_error()));
+			rd_kafka_destroy(rk);
+			return 1;
+		}
+
+		/*用于中断的信号*/
+	    signal(SIGINT, stop);
   for (NvDsMetaList * l_frame = batch_meta->frame_meta_list; l_frame != NULL;
       l_frame = l_frame->next) {
     NvDsFrameMeta *frame_meta = l_frame->data;
+    // if (first_frame_time == 0){
+    //   first_frame_time = frame_meta->ntp_timestamp;
+    // }
     guint stream_id = frame_meta->pad_index;
     g_snprintf (bbox_file, sizeof (bbox_file) - 1,
         "%s/%02u_%03u_%06lu.txt", appCtx->config.bbox_dir_path,
         appCtx->index, stream_id, (gulong) frame_meta->frame_num);
-    bbox_params_dump_file = fopen (bbox_file, "w");
-    if (!bbox_params_dump_file)
-      continue;
+   // bbox_params_dump_file = fopen (bbox_file, "w");
+    /* if (!bbox_params_dump_file){
+		
+	} */ 
+      
+/* 
+		fprintf(stderr,
+					"%% Type some text and hit enter to produce message\n"
+					"%% Or just hit enter to only serve delivery reports\n"
+					"%% Press Ctrl-C or Ctrl-D to exit\n"); */
 
+
+        // JsonBuilder *builder = json_builder_new();
+
+	
+    cJSON *root = cJSON_CreateArray();
+	//g_print("xxx");
     for (NvDsMetaList * l_obj = frame_meta->obj_meta_list; l_obj != NULL;
         l_obj = l_obj->next) {
       NvDsObjectMeta *obj = (NvDsObjectMeta *) l_obj->data;
-      int left = obj->rect_params.left;
-      int top = obj->rect_params.top;
-      int right = left + obj->rect_params.width;
-      int bottom = top + obj->rect_params.height;
-      fprintf (bbox_params_dump_file,
-          "%s 0.0 0 0.0 %d.00 %d.00 %d.00 %d.00 0.0 0.0 0.0 0.0 0.0 0.0 0.0\n",
-          obj->obj_label, left, top, right, bottom);
+      float left = obj->rect_params.left;
+      float top = obj->rect_params.top;
+      float right = left + obj->rect_params.width;
+      float bottom = top + obj->rect_params.height;
+      // Here confidence stores detection confidence, since dump gie output
+      // is before tracker plugin
+      float confidence = obj->confidence;
+       
+	   //bbox_params_dump_file = fopen (bbox_file, "w");
+	   
+      time_t utcCalc = frame_meta->ntp_timestamp - 2208988800UL ;
+      struct tm * timeinfo;
+      time ( &utcCalc );
+      timeinfo = localtime ( &utcCalc );
+     
+	  
+      guint frameHeight = frame_meta -> source_frame_height;
+      guint frameWidth = frame_meta -> source_frame_width;
+
+
+      float areaProportion = (obj->rect_params.width * obj->rect_params.height)/(frameHeight*frameWidth);
+      // curl_postjson(obj->obj_label, left, top, right, bottom, confidence, buffer->pts/G_GINT64_CONSTANT (1000000), asctime (timeinfo), areaProportion);
+	  printf(  "%s  %f %f %f %f 0.0 0.0 0.0 0.0 0.0 0.0 0.0 %f\n",
+                obj->obj_label, left, top, right, bottom, confidence);
+     //在对象上添加键值对
+   //  cJSON_AddStringToObject(json,"BOX","Face");
+     //添加数组
+	    char a[20],b[20],c[20],d[20];
+		sprintf(a,"%.1lf",left);//
+		sprintf(b,"%.1lf",top);
+		sprintf(c,"%.1lf",obj->rect_params.width);
+		sprintf(d,"%.1lf",obj->rect_params.height);
+		cJSON *json = cJSON_CreateObject();
+		cJSON *array = NULL;
+		cJSON *array_2 = NULL;
+		cJSON *array_3 = NULL;
+		// cJSON *array_4 = NULL;
+		cJSON_AddNumberToObject(json,"eventTime",0);
+		cJSON_AddItemToObject(json, "box", array_2=cJSON_CreateObject());
+		
+		 //cJSON_AddStringToObject(array_2,"left","xiaohui");
+		/*  cJSON_AddItemToObject(array_2,"left",cJSON_CreateString("1"));
+		 cJSON_AddItemToObject(array_2,"address",cJSON_CreateString("HK")); */
+        
+		cJSON_AddStringToObject(array_2,"leftTopx",(a));
+		cJSON_AddStringToObject(array_2,"leftTopy",b);
+		cJSON_AddStringToObject(array_2,"width",c);
+		cJSON_AddStringToObject(array_2,"height",d);
+		// cJSON_AddItemToObject(json,"Event-Time",array=cJSON_CreateArray());
+		
+
+		cJSON_AddStringToObject(json,"type","人脸");
+		//cJSON_AddItemToObject(array_3,"人脸",cJSON_CreateString(obj->obj_label));
+		cJSON_AddStringToObject(json, "objectId", obj->obj_label);
+		 // cJSON *objx = NULL;
+		/*  cJSON_AddItemToArray(array,objx=cJSON_CreateObject());
+		 cJSON_AddItemToObject(objx,"BBOX",cJSON_CreateString("left"));
+		  cJSON_AddItemToObject(objx,"BBOX",cJSON_CreateString("top"));
+		 cJSON_AddStringToObject(objx,"left","beijing"); 
+		 //在对象上添加键值对
+		 cJSON_AddItemToArray(array,objx=cJSON_CreateObject());
+		 cJSON_AddItemToObject(objx,"name",cJSON_CreateString("andy"));
+		 cJSON_AddItemToObject(objx,"address",cJSON_CreateString("HK"));
+		 cJSON_AddNumberToObject(array,"score",confidence); */
+		cJSON_AddItemToArray(root,json); 
+		
+		char *json_data = NULL;
+		printf("data:%s\n",json_data = cJSON_Print(root));
+		free(json_data);	  
+   /*    fprintf (bbox_params_dump_file,
+          // "%s 0.0 0 0.0 %f %f %f %f 0.0 0.0 0.0 0.0 0.0 0.0 0.0 %f\n",
+          "Object: %s Bounding Box %f %f %f %f Confidence: %f Time: %ld Local Time: %s Ads proportion: %f\n",
+
+          // obj->obj_label, left, top, right, bottom, confidence, frame_meta->ntp_timestamp - first_frame_time);
+          // obj->obj_label, left, top, right, bottom, confidence, buffer->pts/G_GINT64_CONSTANT (1000000),frame_meta->ntp_timestamp);
+          obj->obj_label, left, top, right, bottom, confidence, buffer->pts/G_GINT64_CONSTANT (1000000),  (timeinfo), areaProportion); */
+       
+
     }
-    fclose (bbox_params_dump_file);
+	//cJSON_Delete(json);
+	while(run){
+		//buf=json;
+		char *buf = cJSON_PrintUnformatted(root);
+		//buf = cJSON_Print(json);
+     	int len = strlen(buf);
+         
+     	 //printf("len:%s\n",len);
+     	if(buf[len-1] == '\n')
+     		buf[--len] = '\0';
+
+     	if(len == 0){
+            /*轮询用于事件的kafka handle，
+            事件将导致应用程序提供的回调函数被调用
+            第二个参数是最大阻塞时间，如果设为0，将会是非阻塞的调用*/
+     		rd_kafka_poll(rk, 0);
+     		continue;
+     	}
+
+   // retry:
+         /*Send/Produce message.
+           这是一个异步调用，在成功的情况下，只会将消息排入内部producer队列，
+           对broker的实际传递尝试由后台线程处理，之前注册的传递回调函数(dr_msg_cb)
+           用于在消息传递成功或失败时向应用程序发回信号*/
+     	if (rd_kafka_produce(
+                    /* Topic object */
+     				rkt,
+                    /*使用内置的分区来选择分区*/
+     				RD_KAFKA_PARTITION_UA,
+                    /*生成payload的副本*/
+     				RD_KAFKA_MSG_F_COPY,
+                    /*消息体和长度*/
+     				buf, len,
+                    /*可选键及其长度*/
+     				NULL, 0,
+     				NULL) == -1){
+     		fprintf(stderr, 
+     			"%% Failed to produce to topic %s: %s\n", 
+     			rd_kafka_topic_name(rkt),
+     			rd_kafka_err2str(rd_kafka_last_error()));
+
+     		if (rd_kafka_last_error() == RD_KAFKA_RESP_ERR__QUEUE_FULL){
+                /*如果内部队列满，等待消息传输完成并retry,
+                内部队列表示要发送的消息和已发送或失败的消息，
+                内部队列受限于queue.buffering.max.messages配置项*/
+     			rd_kafka_poll(rk, 1000);
+     			//goto retry;
+     		}	
+     	}else{
+     		fprintf(stderr, "%% Enqueued message (%zd bytes) for topic %s\n", 
+     			len, rd_kafka_topic_name(rkt));
+     	}
+
+        /*producer应用程序应不断地通过以频繁的间隔调用rd_kafka_poll()来为
+        传送报告队列提供服务。在没有生成消息以确定先前生成的消息已发送了其
+        发送报告回调函数(和其他注册json过的回调函数)期间，要确保rd_kafka_poll()
+        仍然被调用*/
+     	rd_kafka_poll(rk, 0);
+     }
+        
+     //fprintf(stderr, "%% Flushing final message.. \n");
+     /*rd_kafka_flush是rd_kafka_poll()的抽象化，
+     等待所有未完成的produce请求完成，通常在销毁producer实例前完成
+     以确保所有排列中和正在传输的produce请求在销毁前完成*/
+     rd_kafka_flush(rk, 10*1000);
+
+     /* Destroy topic object */
+     rd_kafka_topic_destroy(rkt);
+
+     /* Destroy the producer instance */
+     rd_kafka_destroy(rk);
+
+  
+     //将JSON结构所占用的数据空间释放
+    
+	 cJSON_Delete(root);
+   // fclose (bbox_params_dump_file);
+	
   }
+}
+
+
+
+
+/**
+ * Function to dump past frame objs in kitti format.
+ */
+static void
+write_kitti_past_track_output (AppCtx * appCtx, NvDsBatchMeta * batch_meta)
+{
+  if (!appCtx->config.kitti_track_dir_path)
+    return;
+
+  // dump past frame tracked objects appending current frame objects
+  gchar bbox_file[1024] = { 0 };
+  FILE *bbox_params_dump_file = NULL;
+
+    NvDsPastFrameObjBatch *pPastFrameObjBatch = NULL;
+    NvDsUserMetaList *bmeta_list = NULL;
+    NvDsUserMeta *user_meta = NULL;
+    for(bmeta_list=batch_meta->batch_user_meta_list; bmeta_list!=NULL; bmeta_list=bmeta_list->next){
+      user_meta = (NvDsUserMeta *)bmeta_list->data;
+      if(user_meta && user_meta->base_meta.meta_type==NVDS_TRACKER_PAST_FRAME_META){
+        pPastFrameObjBatch = (NvDsPastFrameObjBatch *) (user_meta->user_meta_data);
+        for (uint si=0; si < pPastFrameObjBatch->numFilled; si++){
+          NvDsPastFrameObjStream *objStream = (pPastFrameObjBatch->list) + si;
+          guint stream_id = (guint)(objStream->streamID);
+          for (uint li=0; li<objStream->numFilled; li++){
+            NvDsPastFrameObjList *objList = (objStream->list) + li;
+            for (uint oi=0; oi<objList->numObj; oi++) {
+              NvDsPastFrameObj *obj = (objList->list) + oi;
+              g_snprintf (bbox_file, sizeof (bbox_file) - 1,
+                "%s/%02u_%03u_%06lu.txt", appCtx->config.kitti_track_dir_path,
+                appCtx->index, stream_id, (gulong) obj->frameNum);
+
+              float left = obj->tBbox.left;
+              float right = left + obj->tBbox.width;
+              float top = obj->tBbox.top;
+              float bottom = top + obj->tBbox.height;
+              // Past frame object confidence given by tracker
+              float confidence = obj->confidence;
+              bbox_params_dump_file = fopen (bbox_file, "a");
+              if (!bbox_params_dump_file){
+                continue;
+              }
+              fprintf(bbox_params_dump_file,
+                "%s %lu 0.0 0 0.0 %f %f %f %f 0.0 0.0 0.0 0.0 0.0 0.0 0.0 %f\n",
+                objList->objLabel, objList->uniqueId, left, top, right, bottom, confidence);
+              fclose (bbox_params_dump_file);
+            }
+          }
+        }
+      }
+    }
 }
 
 /**
@@ -286,39 +669,441 @@ write_kitti_output (AppCtx * appCtx, NvDsBatchMeta * batch_meta)
  * Data of different sources and frames is dumped in separate file.
  */
 static void
-write_kitti_track_output (AppCtx * appCtx, NvDsBatchMeta * batch_meta)
+write_kitti_track_output (AppCtx * appCtx, NvDsBatchMeta * batch_meta,std::vector<std::string> &predNames, std::vector<float> &predSims)
 {
-  gchar bbox_file[1024] = { 0 };
-  FILE *bbox_params_dump_file = NULL;
+      
+    // gchar bbox_file[1024] = { 0 };
+  //FILE *bbox_params_dump_file = NULL;
 
-  if (!appCtx->config.kitti_track_dir_path)
-    return;
+  /*  if (!appCtx->config.bbox_dir_path)
+    return ;  */
+  //continue;
+        rd_kafka_t *rk;            /*Producer instance handle*/
+		rd_kafka_topic_t *rkt;     /*topic对象*/
+		rd_kafka_conf_t *conf;     /*临时配置对象*/
+		char errstr[512];          
+		//char buf[512];             
+		const char *brokers;       
+		const char *topic;         
+		brokers = "localhost:9092";
+		topic = "test";
+        int cous=0;
+		/* 创建一个kafka配置占位 */
+		conf = rd_kafka_conf_new();
 
+		/*创建broker集群*/
+		if (rd_kafka_conf_set(conf, "bootstrap.servers", brokers, errstr,
+					sizeof(errstr)) != RD_KAFKA_CONF_OK){
+			fprintf(stderr, "%s\n", errstr);
+			return 1;
+		}
+
+		/*设置发送报告回调函数，rd_kafka_produce()接收的每条消息都会调用一次该回调函数
+		 *应用程序需要定期调用rd_kafka_poll()来服务排队的发送报告回调函数*/
+		rd_kafka_conf_set_dr_msg_cb(conf, dr_msg_cb);
+
+		/*创建producer实例
+		  rd_kafka_new()获取conf对象的所有权,应用程序在此调用之后不得再次引用它*/
+		rk = rd_kafka_new(RD_KAFKA_PRODUCER, conf, errstr, sizeof(errstr));
+		if(!rk){
+			fprintf(stderr, "%% Failed to create new producer:%s\n", errstr);
+			return 1;
+		}
+
+		/*实例化一个或多个topics(`rd_kafka_topic_t`)来提供生产或消费，topic
+		对象保存topic特定的配置，并在内部填充所有可用分区和leader brokers，*/
+		rkt = rd_kafka_topic_new(rk, topic, NULL);
+		if (!rkt){
+			fprintf(stderr, "%% Failed to create topic object: %s\n", 
+					rd_kafka_err2str(rd_kafka_last_error()));
+			rd_kafka_destroy(rk);
+			return 1;
+		}
+
+		/*用于中断的信号*/
+	    signal(SIGINT, stop);
   for (NvDsMetaList * l_frame = batch_meta->frame_meta_list; l_frame != NULL;
       l_frame = l_frame->next) {
     NvDsFrameMeta *frame_meta = l_frame->data;
+    // if (first_frame_time == 0){
+    //   first_frame_time = frame_meta->ntp_timestamp;
+    // }
     guint stream_id = frame_meta->pad_index;
-    g_snprintf (bbox_file, sizeof (bbox_file) - 1,
-        "%s/%02u_%03u_%06lu.txt", appCtx->config.kitti_track_dir_path,
-        appCtx->index, stream_id, (gulong) frame_meta->frame_num);
-    bbox_params_dump_file = fopen (bbox_file, "w");
-    if (!bbox_params_dump_file)
-      continue;
+   /*  g_snprintf (bbox_file, sizeof (bbox_file) - 1,
+        "%s/%02u_%03u_%06lu.txt", appCtx->config.bbox_dir_path,
+        appCtx->index, stream_id, (gulong) frame_meta->frame_num); */
+   // bbox_params_dump_file = fopen (bbox_file, "w");
+    /* if (!bbox_params_dump_file){
+		
+	} */ 
+      
+/*    
+		fprintf(stderr,
+					"%% Type some text and hit enter to produce message\n"
+					"%% Or just hit enter to only serve delivery reports\n"
+					"%% Press Ctrl-C or Ctrl-D to exit\n"); */
 
+
+        // JsonBuilder *builder = json_builder_new();
+    int index_count=0;
+	
+    cJSON *root = cJSON_CreateArray();
+	
     for (NvDsMetaList * l_obj = frame_meta->obj_meta_list; l_obj != NULL;
         l_obj = l_obj->next) {
       NvDsObjectMeta *obj = (NvDsObjectMeta *) l_obj->data;
-      int left = obj->rect_params.left;
-      int top = obj->rect_params.top;
-      int right = left + obj->rect_params.width;
-      int bottom = top + obj->rect_params.height;
-      guint64 id = obj->object_id;
-      fprintf (bbox_params_dump_file,
-          "%s %lu 0.0 0 0.0 %d.00 %d.00 %d.00 %d.00 0.0 0.0 0.0 0.0 0.0 0.0 0.0\n",
-          obj->obj_label, id, left, top, right, bottom);
+      float left = obj->rect_params.left;
+      float top = obj->rect_params.top;
+      float right = left + obj->rect_params.width;
+      float bottom = top + obj->rect_params.height;
+      // Here confidence stores detection confidence, since dump gie output
+      // is before tracker plugin
+      float confidence = obj->confidence;
+       
+	   //bbox_params_dump_file = fopen (bbox_file, "w");
+	   
+      time_t utcCalc = frame_meta->ntp_timestamp - 2208988800UL ;
+      struct tm * timeinfo;
+      time ( &utcCalc );
+      timeinfo= gmtime(&utcCalc );
+	  timeinfo->tm_hour+=8;
+     
+	  char result[50];
+	  size_t dstSize = strftime(result, 50, "%Y-%m-%d %T", timeinfo);
+      guint frameHeight = frame_meta -> source_frame_height;
+      guint frameWidth = frame_meta -> source_frame_width;
+
+   
+      float areaProportion = (obj->rect_params.width * obj->rect_params.height)/(frameHeight*frameWidth);
+      // curl_postjson(obj->obj_label, left, top, right, bottom, confidence, buffer->pts/G_GINT64_CONSTANT (1000000), asctime (timeinfo), areaProportion);
+	/*   printf(  "%s  %f %f %f %f 0.0 0.0 0.0 0.0 0.0 0.0 0.0 %f\n",
+                obj->obj_label, left, top, right, bottom, confidence); */
+     //在对象上添加键值对
+   //  cJSON_AddStringToObject(json,"BOX","Face");
+     //添加数组
+	    char a[20],b[20],c[20],d[20];
+		sprintf(a,"%.1lf",left);//
+		sprintf(b,"%.1lf",top);
+		sprintf(c,"%.1lf",obj->rect_params.width);
+		sprintf(d,"%.1lf",obj->rect_params.height);
+		cJSON *json = cJSON_CreateObject();
+		cJSON *array = NULL;
+		cJSON *array_2 = NULL;
+		cJSON *array_3 = NULL;
+		// cJSON *array_4 = NULL;
+		//cJSON_AddNumberToObject(json,"eventTime",0);
+		cJSON_AddItemToObject(json, "Box", array_2=cJSON_CreateObject());
+		
+		 //cJSON_AddStringToObject(array_2,"left","xiaohui");
+		/*  cJSON_AddItemToObject(array_2,"left",cJSON_CreateString("1"));
+		 cJSON_AddItemToObject(array_2,"address",cJSON_CreateString("HK")); */
+        
+		cJSON_AddStringToObject(array_2,"leftTopx",(a));
+		cJSON_AddStringToObject(array_2,"leftTopy",b);
+		cJSON_AddStringToObject(array_2,"width",c);
+		cJSON_AddStringToObject(array_2,"height",d);
+		// cJSON_AddItemToObject(json,"Event-Time",array=cJSON_CreateArray());
+		cJSON_AddStringToObject(json,"eventTime",result);
+		cJSON_AddStringToObject(json,"type","人脸");
+		//g_print("xxxaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:\n",appCtx->predNames.size());
+		for(auto i:predNames)
+		std::cout<<"----------------检测识别的人："<<i<<std::endl;
+		if(predNames.empty())
+			cJSON_AddStringToObject(json, "objectId", "Unknown_id");
+		else
+			cJSON_AddStringToObject(json, "objectId", predNames[index_count].c_str());
+		//g_print("xxxaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:\n",appCtx->predNames.size());
+		 // cJSON *objx = NULL;
+		/*  cJSON_AddItemToArray(array,objx=cJSON_CreateObject());
+		 cJSON_AddItemToObject(objx,"BBOX",cJSON_CreateString("left"));
+		  cJSON_AddItemToObject(objx,"BBOX",cJSON_CreateString("top"));
+		 cJSON_AddStringToObject(objx,"left","beijing"); 
+		 //在对象上添加键值对
+		 cJSON_AddItemToArray(array,objx=cJSON_CreateObject());
+		 cJSON_AddItemToObject(objx,"name",cJSON_CreateString("andy"));
+		 cJSON_AddItemToObject(objx,"address",cJSON_CreateString("HK"));
+		 cJSON_AddNumberToObject(array,"score",confidence); */
+		cJSON_AddItemToArray(root,json); 
+		
+		char *json_data = NULL;
+		printf("data:%s\n",json_data = cJSON_Print(root));
+		free(json_data);	  
+   /*    fprintf (bbox_params_dump_file,
+          // "%s 0.0 0 0.0 %f %f %f %f 0.0 0.0 0.0 0.0 0.0 0.0 0.0 %f\n",
+          "Object: %s Bounding Box %f %f %f %f Confidence: %f Time: %ld Local Time: %s Ads proportion: %f\n",
+
+          // obj->obj_label, left, top, right, bottom, confidence, frame_meta->ntp_timestamp - first_frame_time);
+          // obj->obj_label, left, top, right, bottom, confidence, buffer->pts/G_GINT64_CONSTANT (1000000),frame_meta->ntp_timestamp);
+          obj->obj_label, left, top, right, bottom, confidence, buffer->pts/G_GINT64_CONSTANT (1000000),  (timeinfo), areaProportion); */
+       index_count++;
+
     }
-    fclose (bbox_params_dump_file);
+	//cJSON_Delete(json);
+	while(run){
+		//buf=json;
+		char *buf = cJSON_PrintUnformatted(root);
+		//buf = cJSON_Print(json);
+     	int len = strlen(buf);
+         
+     	 //printf("len:%s\n",len);
+     	if(buf[len-1] == '\n')
+     		buf[--len] = '\0';
+
+     	if(len == 0){
+            /*轮询用于事件的kafka handle，
+            事件将导致应用程序提供的回调函数被调用
+            第二个参数是最大阻塞时间，如果设为0，将会是非阻塞的调用*/
+     		rd_kafka_poll(rk, 0);
+     		continue;
+     	}
+
+   // retry:
+         /*Send/Produce message.
+           这是一个异步调用，在成功的情况下，只会将消息排入内部producer队列，
+           对broker的实际传递尝试由后台线程处理，之前注册的传递回调函数(dr_msg_cb)
+           用于在消息传递成功或失败时向应用程序发回信号*/
+     	if (rd_kafka_produce(
+                    /* Topic object */
+     				rkt,
+                    /*使用内置的分区来选择分区*/
+     				RD_KAFKA_PARTITION_UA,
+                    /*生成payload的副本*/
+     				RD_KAFKA_MSG_F_COPY,
+                    /*消息体和长度*/
+     				buf, len,
+                    /*可选键及其长度*/
+     				NULL, 0,
+     				NULL) == -1){
+     		fprintf(stderr, 
+     			"%% Failed to produce to topic %s: %s\n", 
+     			rd_kafka_topic_name(rkt),
+     			rd_kafka_err2str(rd_kafka_last_error()));
+
+     		if (rd_kafka_last_error() == RD_KAFKA_RESP_ERR__QUEUE_FULL){
+                /*如果内部队列满，等待消息传输完成并retry,
+                内部队列表示要发送的消息和已发送或失败的消息，
+                内部队列受限于queue.buffering.max.messages配置项*/
+     			rd_kafka_poll(rk, 1000);
+     			//goto retry;
+     		}	
+     	}else{
+     		fprintf(stderr, "%% Enqueued message (%zd bytes) for topic %s\n", 
+     			len, rd_kafka_topic_name(rkt));
+     	}
+
+        /*producer应用程序应不断地通过以频繁的间隔调用rd_kafka_poll()来为
+        传送报告队列提供服务。在没有生成消息以确定先前生成的消息已发送了其
+        发送报告回调函数(和其他注册json过的回调函数)期间，要确保rd_kafka_poll()
+        仍然被调用*/
+     	rd_kafka_poll(rk, 0);
+     }
+        
+     //fprintf(stderr, "%% Flushing final message.. \n");
+     /*rd_kafka_flush是rd_kafka_poll()的抽象化，
+     等待所有未完成的produce请求完成，通常在销毁producer实例前完成
+     以确保所有排列中和正在传输的produce请求在销毁前完成*/
+     rd_kafka_flush(rk, 10*1000);
+
+     /* Destroy topic object */
+     rd_kafka_topic_destroy(rkt);
+
+     /* Destroy the producer instance */
+     rd_kafka_destroy(rk);
+
+  
+     //将JSON结构所占用的数据空间释放
+    
+	 cJSON_Delete(root);
+	 //predNames.clear();
+   // fclose (bbox_params_dump_file);
+	
   }
+}
+
+
+
+
+/**
+ * kafka
+ */
+static void
+write_kitti_kafka_output (AppCtx * appCtx, NvDsBatchMeta * batch_meta,std::vector<std::string> &predNames)
+{
+
+
+  /*  if (!appCtx->config.bbox_dir_path)
+    return ;  */
+ 
+    int index_count=0;
+    cJSON *root = cJSON_CreateArray();
+		/*用于中断的信号*/
+	signal(SIGINT, stop);
+    for (NvDsMetaList * l_frame = batch_meta->frame_meta_list; l_frame != NULL;
+      l_frame = l_frame->next) {
+    NvDsFrameMeta *frame_meta = l_frame->data;
+   
+    guint stream_id = frame_meta->pad_index;
+   
+    for (NvDsMetaList * l_obj = frame_meta->obj_meta_list; l_obj != NULL;
+        l_obj = l_obj->next) {
+      NvDsObjectMeta *obj = (NvDsObjectMeta *) l_obj->data;
+      float left = obj->rect_params.left;
+      float top = obj->rect_params.top;
+      float right = left + obj->rect_params.width;
+      float bottom = top + obj->rect_params.height;
+      // Here confidence stores detection confidence, since dump gie output
+      // is before tracker plugin
+     // float confidence = obj->confidence;
+  
+      time_t utcCalc = frame_meta->ntp_timestamp - 2208988800UL ;
+      struct tm * timeinfo;
+      time ( &utcCalc );
+      timeinfo= gmtime(&utcCalc );
+	  timeinfo->tm_hour+=8;
+     
+	  char result[50];
+	  size_t dstSize = strftime(result, 50, "%Y-%m-%d %T", timeinfo);
+      guint frameHeight = frame_meta -> source_frame_height;
+      guint frameWidth = frame_meta -> source_frame_width;
+
+      //std::cout<<"自己的计数器："<<index_count<<std::endl;
+	  //std::cout<<"内置计数器："<<stream_id<<std::endl;
+     //在对象上添加键值对
+   //  cJSON_AddStringToObject(json,"BOX","Face");
+     //添加数组
+	    char a[20],b[20],c[20],d[20];
+		sprintf(a,"%.1lf",left);//
+		sprintf(b,"%.1lf",top);
+		sprintf(c,"%.1lf",obj->rect_params.width);
+		sprintf(d,"%.1lf",obj->rect_params.height);
+		cJSON *json = cJSON_CreateObject();
+		//cJSON *array = NULL;
+		cJSON *array_2 = NULL;
+		//cJSON *array_3 = NULL;
+		// cJSON *array_4 = NULL;
+		//cJSON_AddNumberToObject(json,"eventTime",0);
+		cJSON_AddNumberToObject(json,"数据源—流id",stream_id);
+		cJSON_AddItemToObject(json, "Box", array_2=cJSON_CreateObject());
+		
+		 //cJSON_AddStringToObject(array_2,"left","xiaohui");
+		/*  cJSON_AddItemToObject(array_2,"left",cJSON_CreateString("1"));
+		 cJSON_AddItemToObject(array_2,"address",cJSON_CreateString("HK")); */
+        
+		cJSON_AddStringToObject(array_2,"leftTopx",a);
+		cJSON_AddStringToObject(array_2,"leftTopy",b);
+		cJSON_AddStringToObject(array_2,"width",c);
+		cJSON_AddStringToObject(array_2,"height",d);
+		
+		// cJSON_AddItemToObject(json,"Event-Time",array=cJSON_CreateArray());
+		cJSON_AddStringToObject(json,"eventTime",result);
+		cJSON_AddStringToObject(json,"type","文本识别任务");
+		//g_print("xxxaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:\n",appCtx->predNames.size());
+		/* for(auto i:predNames)
+			std::cout<<"----------------检测识别的："<<i<<std::endl; */
+	    if(predNames.empty())
+			cJSON_AddStringToObject(json, "objectId", "Unknown_word"); 
+		else
+		{
+        cJSON_AddStringToObject(json, "objectId", predNames[index_count].c_str());
+		}
+		//g_print("xxxaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:\n",appCtx->predNames.size());
+		 // cJSON *objx = NULL;
+		/*  cJSON_AddItemToArray(array,objx=cJSON_CreateObject());
+		 cJSON_AddItemToObject(objx,"BBOX",cJSON_CreateString("left"));
+		  cJSON_AddItemToObject(objx,"BBOX",cJSON_CreateString("top"));
+		 cJSON_AddStringToObject(objx,"left","beijing"); 
+		 //在对象上添加键值对
+		 cJSON_AddItemToArray(array,objx=cJSON_CreateObject());
+		 cJSON_AddItemToObject(objx,"name",cJSON_CreateString("andy"));
+		 cJSON_AddItemToObject(objx,"address",cJSON_CreateString("HK"));
+		 cJSON_AddNumberToObject(array,"score",confidence); */
+		cJSON_AddItemToArray(root,json); 
+		
+	/* 	char *json_data = NULL;
+		printf("data:%s\n",json_data = cJSON_Print(root));
+		free(json_data); */	  
+   /*    fprintf (bbox_params_dump_file,
+          // "%s 0.0 0 0.0 %f %f %f %f 0.0 0.0 0.0 0.0 0.0 0.0 0.0 %f\n",
+          "Object: %s Bounding Box %f %f %f %f Confidence: %f Time: %ld Local Time: %s Ads proportion: %f\n",
+
+          // obj->obj_label, left, top, right, bottom, confidence, frame_meta->ntp_timestamp - first_frame_time);
+          // obj->obj_label, left, top, right, bottom, confidence, buffer->pts/G_GINT64_CONSTANT (1000000),frame_meta->ntp_timestamp);
+          obj->obj_label, left, top, right, bottom, confidence, buffer->pts/G_GINT64_CONSTANT (1000000),  (timeinfo), areaProportion); */
+        index_count++;
+    }
+}
+ 
+	char *json_data = NULL;
+    printf("data:%s\n",json_data = cJSON_Print(root));
+	
+	char *buf = cJSON_PrintUnformatted(root);
+    size_t len = strlen(buf);
+    //std::cout<<"检查数量："<<index_count<<std::endl;
+     	
+    if(buf[len-1] == '\n')
+     		buf[--len] = '\0';
+
+    if(len == 0){
+            /*轮询用于事件的kafka handle，
+            事件将导致应用程序提供的回调函数被调用
+            第二个参数是最大阻塞时间，如果设为0，将会是非阻塞的调用*/
+     		rd_kafka_poll(appCtx->rk, 0);
+    }
+         /*Send/Produce message.
+           这是一个异步调用，在成功的情况下，只会将消息排入内部producer队列，
+           对broker的实际传递尝试由后台线程处理，之前注册的传递回调函数(dr_msg_cb)
+           用于在消息传递成功或失败时向应用程序发回信号*/
+	std::cout<<"x000000000000000000011111111"<<std::endl;
+ 	
+   if (rd_kafka_produce(
+                    /* Topic object */
+     				appCtx->rkt,
+                    /*使用内置的分区来选择分区*/
+     				RD_KAFKA_PARTITION_UA,
+                    /*生成payload的副本*/
+     				RD_KAFKA_MSG_F_COPY,
+                    /*消息体和长度*/
+     				buf, len,
+                    /*可选键及其长度*/
+     				NULL, 0,
+     				NULL) == -1){
+						//std::cout<<"xxxxxxxxxxx11111111"<<std::endl;
+     	/* 	fprintf(stderr, 
+     			"%% Failed to produce to topic %s: %s\n", 
+     			rd_kafka_topic_name(appCtx->rkt),
+     			rd_kafka_err2str(rd_kafka_last_error())); */
+            
+     		if (rd_kafka_last_error() == RD_KAFKA_RESP_ERR__QUEUE_FULL){
+                /*如果内部队列满，等待消息传输完成并retry,
+                内部队列表示要发送的消息和已发送或失败的消息，
+                内部队列受限于queue.buffering.max.messages配置项*/
+     			rd_kafka_poll(appCtx->rk, 10000);
+			}	
+	}
+ 
+   
+
+	/* else{
+     		fprintf(stderr, "%% Enqueued success message (%zd bytes) for topic %s\n", 
+     			len, rd_kafka_topic_name(appCtx->rkt));
+     	} */
+	
+        /*producer应用程序应不断地通过以频繁的间隔调用rd_kafka_poll()来为
+        传送报告队列提供服务。在没有生成消息以确定先前生成的消息已发送了其
+        发送报告回调函数(和其他注册json过的回调函数)期间，要确保rd_kafka_poll()
+        仍然被调用*/
+    rd_kafka_poll(appCtx->rk, 0);
+     //fprintf(stderr, "%% Flushing final message.. \n");
+     /*rd_kafka_flush是rd_kafka_poll()的抽象化，
+     等待所有未完成的produce请求完成，通常在销毁producer实例前完成
+     以确保所有排列中和正在传输的produce请求在销毁前完成*/
+    rd_kafka_flush(appCtx->rk, 10*1000);
+     //将JSON结构所占用的数据空间释放
+	free(json_data);
+    free(buf);
+	cJSON_Delete(root);
+	 //predNames.clear();
+   // fclose (bbox_params_dump_file);
 }
 
 static gint
@@ -342,112 +1127,101 @@ component_id_compare_func (gconstpointer a, gconstpointer b)
  * It also demonstrates how to join the different labels(PGIE + SGIEs)
  * of an object to form a single string.
  */
-static void
-process_meta (AppCtx * appCtx, NvDsBatchMeta * batch_meta)
-{
-  // For single source always display text either with demuxer or with tiler
-  if (!appCtx->config.tiled_display_config.enable ||
-      appCtx->config.num_source_sub_bins == 1) {
-    appCtx->show_bbox_text = 1;
-  }
-
-  for (NvDsMetaList * l_frame = batch_meta->frame_meta_list; l_frame != NULL;
-      l_frame = l_frame->next) {
-    NvDsFrameMeta *frame_meta = l_frame->data;
-    for (NvDsMetaList * l_obj = frame_meta->obj_meta_list; l_obj != NULL;
-        l_obj = l_obj->next) {
-      NvDsObjectMeta *obj = (NvDsObjectMeta *) l_obj->data;
-      gint class_index = obj->class_id;
-      NvDsGieConfig *gie_config = NULL;
-      gchar *str_ins_pos = NULL;
-
-      if (obj->unique_component_id ==
-          (gint) appCtx->config.primary_gie_config.unique_id) {
-        gie_config = &appCtx->config.primary_gie_config;
-      } else {
-        for (gint i = 0; i < (gint) appCtx->config.num_secondary_gie_sub_bins;
-            i++) {
-          gie_config = &appCtx->config.secondary_gie_sub_bin_config[i];
-          if (obj->unique_component_id == (gint) gie_config->unique_id) {
-            break;
-          }
-          gie_config = NULL;
-        }
-      }
-      g_free (obj->text_params.display_text);
-      obj->text_params.display_text = NULL;
-
-      if (gie_config != NULL) {
-        if (g_hash_table_contains (gie_config->bbox_border_color_table,
-                class_index + (gchar *) NULL)) {
-          obj->rect_params.border_color =
-              *((NvOSD_ColorParams *)
-              g_hash_table_lookup (gie_config->bbox_border_color_table,
-                  class_index + (gchar *) NULL));
-        } else {
-          obj->rect_params.border_color = gie_config->bbox_border_color;
-        }
-        obj->rect_params.border_width = appCtx->config.osd_config.border_width;
-
-        if (g_hash_table_contains (gie_config->bbox_bg_color_table,
-                class_index + (gchar *) NULL)) {
-          obj->rect_params.has_bg_color = 1;
-          obj->rect_params.bg_color =
-              *((NvOSD_ColorParams *)
-              g_hash_table_lookup (gie_config->bbox_bg_color_table,
-                  class_index + (gchar *) NULL));
-        } else {
-          obj->rect_params.has_bg_color = 0;
-        }
-      }
-
-      if (!appCtx->show_bbox_text)
-        continue;
-
-      obj->text_params.x_offset = obj->rect_params.left;
-      obj->text_params.y_offset = obj->rect_params.top - 30;
-      obj->text_params.font_params.font_color =
-          appCtx->config.osd_config.text_color;
-      obj->text_params.font_params.font_size =
-          appCtx->config.osd_config.text_size;
-      obj->text_params.font_params.font_name = appCtx->config.osd_config.font;
-      if (appCtx->config.osd_config.text_has_bg) {
-        obj->text_params.set_bg_clr = 1;
-        obj->text_params.text_bg_clr = appCtx->config.osd_config.text_bg_color;
-      }
-
-      obj->text_params.display_text = g_malloc (128);
-      obj->text_params.display_text[0] = '\0';
-      str_ins_pos = obj->text_params.display_text;
-
-      if (obj->obj_label[0] != '\0')
-        sprintf (str_ins_pos, "%s", obj->obj_label);
-      str_ins_pos += strlen (str_ins_pos);
-
-      if (obj->object_id != UNTRACKED_OBJECT_ID) {
-        sprintf (str_ins_pos, " %lu", obj->object_id);
-        str_ins_pos += strlen (str_ins_pos);
-      }
-
-      obj->classifier_meta_list =
-          g_list_sort (obj->classifier_meta_list, component_id_compare_func);
-      for (NvDsMetaList * l_class = obj->classifier_meta_list; l_class != NULL;
-          l_class = l_class->next) {
-        NvDsClassifierMeta *cmeta = (NvDsClassifierMeta *) l_class->data;
-        for (NvDsMetaList * l_label = cmeta->label_info_list; l_label != NULL;
-            l_label = l_label->next) {
-          NvDsLabelInfo *label = (NvDsLabelInfo *) l_label->data;
-          if (label->pResult_label) {
-            sprintf (str_ins_pos, " %s", label->pResult_label);
-          } else if (label->result_label[0] != '\0') {
-            sprintf (str_ins_pos, " %s", label->result_label);
-          }
-          str_ins_pos += strlen (str_ins_pos);
-        }
-
-      }
+static void process_meta(AppCtx *appCtx, NvDsBatchMeta *batch_meta) {
+    // For single source always display text either with demuxer or with tiler
+    if (!appCtx->config.tiled_display_config.enable || appCtx->config.num_source_sub_bins == 1) {
+        appCtx->show_bbox_text = 1;
     }
-  }
+
+    for (NvDsMetaList *l_frame = batch_meta->frame_meta_list; l_frame != NULL; l_frame = l_frame->next) {
+        NvDsFrameMeta *frame_meta = (NvDsFrameMeta *)l_frame->data;
+        for (NvDsMetaList *l_obj = frame_meta->obj_meta_list; l_obj != NULL; l_obj = l_obj->next) {
+            NvDsObjectMeta *obj = (NvDsObjectMeta *)l_obj->data;
+            gint class_index = obj->class_id;
+            NvDsGieConfig *gie_config = NULL;
+            gchar *str_ins_pos = NULL;
+
+            if (obj->unique_component_id == (gint)appCtx->config.primary_gie_config.unique_id) {
+                gie_config = &appCtx->config.primary_gie_config;
+            } else {
+                for (gint i = 0; i < (gint)appCtx->config.num_secondary_gie_sub_bins; i++) {
+                    gie_config = &appCtx->config.secondary_gie_sub_bin_config[i];
+                    if (obj->unique_component_id == (gint)gie_config->unique_id) {
+                        break;
+                    }
+                    gie_config = NULL;
+                }
+            }
+            g_free(obj->text_params.display_text);
+            obj->text_params.display_text = NULL;
+
+            if (gie_config != NULL) {
+                if (g_hash_table_contains(gie_config->bbox_border_color_table, class_index + (gchar *)NULL)) {
+                    obj->rect_params.border_color = *((NvOSD_ColorParams *)g_hash_table_lookup(
+                        gie_config->bbox_border_color_table, class_index + (gchar *)NULL));
+                } else {
+                    obj->rect_params.border_color = gie_config->bbox_border_color;
+                }
+                obj->rect_params.border_width = appCtx->config.osd_config.border_width;
+
+                if (g_hash_table_contains(gie_config->bbox_bg_color_table, class_index + (gchar *)NULL)) {
+                    obj->rect_params.has_bg_color = 1;
+                    obj->rect_params.bg_color = *((NvOSD_ColorParams *)g_hash_table_lookup(
+                        gie_config->bbox_bg_color_table, class_index + (gchar *)NULL));
+                } else {
+                    obj->rect_params.has_bg_color = 0;
+                }
+            }
+
+            if (!appCtx->show_bbox_text)
+                continue;
+
+            obj->text_params.x_offset = obj->rect_params.left;
+            obj->text_params.y_offset = obj->rect_params.top - 30;
+            obj->text_params.font_params.font_color = appCtx->config.osd_config.text_color;
+            obj->text_params.font_params.font_size = appCtx->config.osd_config.text_size;
+            obj->text_params.font_params.font_name = appCtx->config.osd_config.font;
+            if (appCtx->config.osd_config.text_has_bg) {
+                obj->text_params.set_bg_clr = 1;
+                obj->text_params.text_bg_clr = appCtx->config.osd_config.text_bg_color;
+            }
+
+            obj->text_params.display_text = (char *)g_malloc(128);
+            obj->text_params.display_text[0] = '\0';
+            str_ins_pos = obj->text_params.display_text;
+
+            if (obj->obj_label[0] != '\0')
+                sprintf(str_ins_pos, "%s", obj->obj_label);
+            str_ins_pos += strlen(str_ins_pos);
+
+            if (obj->object_id != UNTRACKED_OBJECT_ID) {
+                /** object_id is a 64-bit sequential value;
+                 * but considering the display aesthetic,
+                 * trimming to lower 32-bits */
+                if (appCtx->config.tracker_config.display_tracking_id) {
+                    guint64 const LOW_32_MASK = 0x00000000FFFFFFFF;
+                    sprintf(str_ins_pos, " %lu", (obj->object_id & LOW_32_MASK));
+                    str_ins_pos += strlen(str_ins_pos);
+                }
+            }
+
+            
+         /*    obj->classifier_meta_list = g_list_sort(obj->classifier_meta_list, component_id_compare_func);
+            for (NvDsMetaList *l_class = obj->classifier_meta_list; l_class != NULL; l_class = l_class->next) {
+                NvDsClassifierMeta *cmeta = (NvDsClassifierMeta *)l_class->data;
+                for (NvDsMetaList *l_label = cmeta->label_info_list; l_label != NULL; l_label = l_label->next) {
+                    NvDsLabelInfo *label = (NvDsLabelInfo *)l_label->data;
+                    if (label->pResult_label) {
+                        sprintf(str_ins_pos, " %s", label->pResult_label);
+                    } else if (label->result_label[0] != '\0') {
+                        sprintf(str_ins_pos, " %s", label->result_label);
+                    }
+                    str_ins_pos += strlen(str_ins_pos);
+                }
+            } */
+           
+        }
+    }
 }
 
 /**
@@ -463,7 +1237,10 @@ process_buffer (GstBuffer * buf, AppCtx * appCtx, guint index)
     NVGSTDS_WARN_MSG_V ("Batch meta not found for buffer %p", buf);
     return;
   }
+ 
   process_meta (appCtx, batch_meta);
+  
+  //write_kitti_output (appCtx, batch_meta, buf);
   //NvDsInstanceData *data = &appCtx->instance_data[index];
   //guint i;
 
@@ -472,17 +1249,18 @@ process_buffer (GstBuffer * buf, AppCtx * appCtx, guint index)
   /* Opportunity to modify the processed metadata or do analytics based on
    * type of object e.g. maintaining count of particular type of car.
    */
-  if (appCtx->all_bbox_generated_cb) {
+   if (appCtx->all_bbox_generated_cb) {
     appCtx->all_bbox_generated_cb (appCtx, buf, batch_meta, index);
-  }
+  }  
   //data->bbox_list_size = 0;
-
+//std::cout<<"测试111111111"<<std::endl;
   /*
    * callback to attach application specific additional metadata.
    */
   if (appCtx->overlay_graphics_cb) {
     appCtx->overlay_graphics_cb (appCtx, buf, batch_meta, index);
   }
+  
 }
 
 /**
@@ -502,7 +1280,8 @@ gie_primary_processing_done_buf_prob (GstPad * pad, GstPadProbeInfo * info,
     return GST_PAD_PROBE_OK;
   }
 
-  write_kitti_output (appCtx, batch_meta);
+  // write_kitti_output (appCtx, batch_meta);
+  // write_kitti_output (appCtx, batch_meta, buf);
 
   return GST_PAD_PROBE_OK;
 }
@@ -515,100 +1294,41 @@ static GstPadProbeReturn
 gie_processing_done_buf_prob (GstPad * pad, GstPadProbeInfo * info,
     gpointer u_data)
 {
+ // g_print("gie_processing_done_buf_prob:\n");
   GstBuffer *buf = (GstBuffer *) info->data;
   NvDsInstanceBin *bin = (NvDsInstanceBin *) u_data;
   guint index = bin->index;
   AppCtx *appCtx = bin->appCtx;
-
+  
   if (gst_buffer_is_writable (buf))
     process_buffer (buf, appCtx, index);
+  
   return GST_PAD_PROBE_OK;
 }
 
 static GstPadProbeReturn
-osd_sink_pad_buffer_probe (GstPad * pad, GstPadProbeInfo * info,
-    gpointer u_data)
-{
-	printf("@@启动探针！！！！");
- GstBuffer *buf = (GstBuffer *) info->data;
-  guint num_rects = 0;
-  NvDsObjectMeta *obj_meta = NULL;
-  guint vehicle_count = 0;
-  guint person_count = 0;
-  NvDsMetaList *l_frame = NULL;
-  NvDsMetaList *l_obj = NULL;
-  NvDsDisplayMeta *display_meta = NULL;
-
-  NvDsBatchMeta *batch_meta = gst_buffer_get_nvds_batch_meta (buf);
-
-  for (l_frame = batch_meta->frame_meta_list; l_frame != NULL;
-      l_frame = l_frame->next) {
-    NvDsFrameMeta *frame_meta = (NvDsFrameMeta *) (l_frame->data);
-    int offset = 0;
-    for (l_obj = frame_meta->obj_meta_list; l_obj != NULL; l_obj = l_obj->next) {
-      obj_meta = (NvDsObjectMeta *) (l_obj->data);
-      
-      if (obj_meta->class_id == 0) {
-        person_count++;
-        num_rects++;
-      }
-    }
-    display_meta = nvds_acquire_display_meta_from_pool (batch_meta);
-    NvOSD_TextParams *txt_params = &display_meta->text_params[0];
-    display_meta->num_labels = 1;
-    txt_params->display_text = (gchar *) g_malloc0 (MAX_DISPLAY_LEN);
-    /* for (NvDsMetaList * l_class = obj_meta->classifier_meta_list; l_class != NULL; l_class = l_class->next) {
-                NvDsClassifierMeta *cmeta = (NvDsClassifierMeta *) l_class->data; */
-            /*    for (NvDsMetaList * l_label = cmeta->label_info_list; l_label != NULL; l_label = l_label->next) {
-                    NvDsLabelInfo *label = (NvDsLabelInfo *) l_label->data; 
-        snprintf (txt_params->display_text, MAX_DISPLAY_LEN, " %d ",
-        label->result_label);  */
-    
-
-    /* Now set the offsets where the string should appear */
-    txt_params->x_offset = 10;
-    txt_params->y_offset = 12;
-
-    /* Font , font-color and font-size */
-    txt_params->font_params.font_name = (gchar *) "Serif";
-    txt_params->font_params.font_size = 10;
-    txt_params->font_params.font_color.red = 1.0;
-    txt_params->font_params.font_color.green = 1.0;
-    txt_params->font_params.font_color.blue = 1.0;
-    txt_params->font_params.font_color.alpha = 1.0;
-
-    /* Text background color */
-    txt_params->set_bg_clr = 1;
-    txt_params->text_bg_clr.red = 0.0;
-    txt_params->text_bg_clr.green = 0.0;
-    txt_params->text_bg_clr.blue = 0.0;
-    txt_params->text_bg_clr.alpha = 1.0;
-
-    nvds_add_display_meta_to_frame (frame_meta, display_meta);
-	  }
-	  //}}
-
-
-  frame_number++;
-  return GST_PAD_PROBE_OK;
-}
-
-
- static GstPadProbeReturn
 tiler_src_pad_buffer_probe (GstPad * pad, GstPadProbeInfo * info, gpointer u_data){
     printf("启动自定义探针!!!!!!!!!!!!!!!!!!!\n");
-    GstBuffer *buf = (GstBuffer *) info->data;
+    GstBuffer *buffer = (GstBuffer *) info->data;
+	NvDsInstanceBin *bin = (NvDsInstanceBin *) u_data;
+   guint index = bin->index;
+    AppCtx *appCtx = bin->appCtx;
     guint num_rects = 0; 
     NvDsObjectMeta *obj_meta = NULL;
     guint vehicle_count = 0;
     guint person_count = 0;
     NvDsMetaList * l_frame = NULL;
     NvDsMetaList * l_obj = NULL;
-
-    NvDsBatchMeta *batch_meta = gst_buffer_get_nvds_batch_meta (buf);
+	cJSON *root = cJSON_CreateArray();
+		/*用于中断的信号*/
+	signal(SIGINT, stop);
+   // NvDsDisplayMeta *display_meta = NULL;
+    NvDsBatchMeta *batch_meta = gst_buffer_get_nvds_batch_meta (buffer);
     //char_rec = CTCGreedyDecoderLayer(outputBboxBuffer,1,25,5990);//int
-
+    int  index_count=0;
 	//std::vector<std::string> *file_to_vector=InputData_To_Vector();
+	
+	
     for (l_frame = batch_meta->frame_meta_list; l_frame != NULL; l_frame = l_frame->next) {
         NvDsFrameMeta *frame_meta = (NvDsFrameMeta *) (l_frame->data);//单帧	
         guint batch_id = frame_meta->batch_id;
@@ -616,20 +1336,42 @@ tiler_src_pad_buffer_probe (GstPad * pad, GstPadProbeInfo * info, gpointer u_dat
         
         for (l_obj = frame_meta->obj_meta_list; l_obj != NULL; l_obj = l_obj->next) {
             guint class_id = 2555;
-            gfloat model_prob = 0;
+            //gfloat model_prob = 0;
             obj_meta = (NvDsObjectMeta *) (l_obj->data);
             guint64 track_id = obj_meta->object_id;
             NvOSD_RectParams rect = obj_meta->rect_params;
             gint color_id = obj_meta->class_id;
             gfloat color_prob = obj_meta->confidence;
             gchar text[128] = "";
-			
+			//NvDsObjectMeta *obj = (NvDsObjectMeta *) l_obj->data;
+			float left = obj_meta->rect_params.left;
+			float top = obj_meta->rect_params.top;
+			float right = left + obj_meta->rect_params.width;
+		 float bottom = top + obj_meta->rect_params.height;
+		  time_t utcCalc = frame_meta->ntp_timestamp - 2208988800UL ;
+      struct tm * timeinfo;
+      time ( &utcCalc );
+      timeinfo= gmtime(&utcCalc );
+	  timeinfo->tm_hour+=8;
+     
+	  char result[50];
+	  size_t dstSize = strftime(result, 50, "%Y-%m-%d %T", timeinfo);
+      guint frameHeight = frame_meta -> source_frame_height;
+      guint frameWidth = frame_meta -> source_frame_width;
+	  std::vector<gchar> message;
+	  //queue<char> Mess;
+	  
         for (NvDsMetaList * l_class = obj_meta->classifier_meta_list; l_class != NULL; l_class = l_class->next) {
                 NvDsClassifierMeta *cmeta = (NvDsClassifierMeta *) l_class->data;
+				
+				
                 for (NvDsMetaList * l_label = cmeta->label_info_list; l_label != NULL; l_label = l_label->next) {
                     NvDsLabelInfo *label = (NvDsLabelInfo *) l_label->data;
                     class_id = label->result_class_id;
-                    model_prob = label->result_prob;
+					
+					
+					
+                   //model_prob = label->result_prob;
 				   //NvDsLabelInfo *label_info =
                   //nvds_acquire_label_info_meta_from_pool (batch_meta);
 			            //label->result_class_id =ind ;
@@ -639,25 +1381,331 @@ tiler_src_pad_buffer_probe (GstPad * pad, GstPadProbeInfo * info, gpointer u_dat
                        
 						// strcpy (label->result_label,
                           //   label->class_id ); */
-						sprintf(text, "text: %s", label->result_label);
-                        printf("text: %s\n", text);
-						
+						sprintf(text, label->result_label);
+                        
+						//message.push_back(label->result_label.c_str());
+						//index_count++;
+						//std::cout<<index_count<<std::endl;
                     }
+                }
+				//write_kitti_kafka_output();
+				
+            }
+		//printf("re: %s\n", text);
+		char a[20],b[20],c[20],d[20];
+		sprintf(a,"%.1lf",left);//
+		sprintf(b,"%.1lf",top);
+		sprintf(c,"%.1lf",obj_meta->rect_params.width);
+		sprintf(d,"%.1lf",obj_meta->rect_params.height);
+		cJSON *json = cJSON_CreateObject();
+		//cJSON *array = NULL;
+		cJSON *array_2 = NULL;
+		//cJSON *array_3 = NULL;
+		// cJSON *array_4 = NULL;
+		//cJSON_AddNumberToObject(json,"eventTime",0);
+		cJSON_AddNumberToObject(json,"数据源—流id",0);
+		cJSON_AddItemToObject(json, "Box", array_2=cJSON_CreateObject());
+		
+		 //cJSON_AddStringToObject(array_2,"left","xiaohui");
+		/*  cJSON_AddItemToObject(array_2,"left",cJSON_CreateString("1"));
+		 cJSON_AddItemToObject(array_2,"address",cJSON_CreateString("HK")); */
+        
+		cJSON_AddStringToObject(array_2,"leftTopx",a);
+		cJSON_AddStringToObject(array_2,"leftTopy",b);
+		cJSON_AddStringToObject(array_2,"width",c);
+		cJSON_AddStringToObject(array_2,"height",d);
+		
+		// cJSON_AddItemToObject(json,"Event-Time",array=cJSON_CreateArray());
+		cJSON_AddStringToObject(json,"eventTime",result);
+		cJSON_AddStringToObject(json,"type","识别任务");
+		//g_print("xxxaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:\n",appCtx->predNames.size());
+		if (strlen(text) ==0)
+		cJSON_AddStringToObject(json, "objectId", "unknow_word");
+		else 
+		cJSON_AddStringToObject(json, "objectId", text);
+	
+		cJSON_AddItemToArray(root,json); 
+		
+	
+       
+  
+}
+}
+
+
+	char *json_data = NULL;
+    //printf("data:%s\n",json_data = cJSON_Print(root));
+	
+	char *buf = cJSON_PrintUnformatted(root);
+    size_t len = strlen(buf);
+    //std::cout<<"检查数量："<<index_count<<std::endl;
+     	
+    if(buf[len-1] == '\n')
+     		buf[--len] = '\0';
+if(len == 0){
+            /*轮询用于事件的kafka handle，
+            事件将导致应用程序提供的回调函数被调用
+            第二个参数是最大阻塞时间，如果设为0，将会是非阻塞的调用*/
+     		rd_kafka_poll(appCtx->rk, 0);
+    }
+         /*Send/Produce message.
+           这是一个异步调用，在成功的情况下，只会将消息排入内部producer队列，
+           对broker的实际传递尝试由后台线程处理，之前注册的传递回调函数(dr_msg_cb)
+           用于在消息传递成功或失败时向应用程序发回信号*/
+	//std::cout<<"x000000000000000000011111111"<<std::endl;
+ 	
+   if (rd_kafka_produce(
+                    /* Topic object */
+     				appCtx->rkt,
+                    /*使用内置的分区来选择分区*/
+     				RD_KAFKA_PARTITION_UA,
+                    /*生成payload的副本*/
+     				RD_KAFKA_MSG_F_COPY,
+                    /*消息体和长度*/
+     				buf, len,
+                    /*可选键及其长度*/
+     				NULL, 0,
+     				NULL) == -1){
+						//std::cout<<"xxxxxxxxxxx11111111"<<std::endl;
+     	/* 	fprintf(stderr, 
+     			"%% Failed to produce to topic %s: %s\n", 
+     			rd_kafka_topic_name(appCtx->rkt),
+     			rd_kafka_err2str(rd_kafka_last_error())); */
+            
+     		if (rd_kafka_last_error() == RD_KAFKA_RESP_ERR__QUEUE_FULL){
+                /*如果内部队列满，等待消息传输完成并retry,
+                内部队列表示要发送的消息和已发送或失败的消息，
+                内部队列受限于queue.buffering.max.messages配置项*/
+     			rd_kafka_poll(appCtx->rk, 10000);
+			}	
+	}
+ 
+ 
+
+	/* else{
+     		fprintf(stderr, "%% Enqueued success message (%zd bytes) for topic %s\n", 
+     			len, rd_kafka_topic_name(appCtx->rkt));
+     	} */
+	
+        /*producer应用程序应不断地通过以频繁的间隔调用rd_kafka_poll()来为
+        传送报告队列提供服务。在没有生成消息以确定先前生成的消息已发送了其
+        发送报告回调函数(和其他注册json过的回调函数)期间，要确保rd_kafka_poll()
+        仍然被调用*/
+    rd_kafka_poll(appCtx->rk, 0);
+     //fprintf(stderr, "%% Flushing final message.. \n");
+     /*rd_kafka_flush是rd_kafka_poll()的抽象化，
+     等待所有未完成的produce请求完成，通常在销毁producer实例前完成
+     以确保所有排列中和正在传输的produce请求在销毁前完成*/
+    rd_kafka_flush(appCtx->rk, 10*1000);
+     //将JSON结构所占用的数据空间释放
+	free(json_data);
+    free(buf);
+	cJSON_Delete(root);
+    return GST_PAD_PROBE_OK;
+}
+
+
+
+std::string strDecode(std::vector<int>& preds, bool raw, std::vector<std::string> &Dict) {
+    std::string str;
+    if (raw) {
+        for (auto v: preds) {
+			 //std::string text;
+			  //sprintf(text,"%s",alphabet[v]);
+			  
+			  //char cc=reinterpret_cast< char*> (alphabet[v])
+             str+=(Dict[v]);
+        }
+    } 
+	else {
+        for (size_t i = 0; i < preds.size(); i++) {
+            if (preds[i] == 0 || (i > 0 && preds[i - 1] == preds[i])) continue;
+			//std::cout<<alphabet[preds[i]]<<std::endl;
+            str+=(Dict[preds[i]]);
+        }
+    }
+    return str;
+} 
+
+
+/*
+ * Get embedding from tensor meta output
+ */
+ 
+static void get_sgie_tensor_output(AppCtx *appCtx, NvDsBatchMeta *batch_meta) {
+    int count = 0;
+    std::cout<<"获取二级模型推理22222222222222222"<<appCtx->rec_output_W<<std::endl;
+    for (NvDsMetaList *l_frame = batch_meta->frame_meta_list; l_frame != NULL; l_frame = l_frame->next) {
+        NvDsFrameMeta *frame_meta = (NvDsFrameMeta *)l_frame->data;
+        for (NvDsMetaList *l_obj = frame_meta->obj_meta_list; l_obj != NULL; l_obj = l_obj->next) {
+            NvDsObjectMeta *obj = (NvDsObjectMeta *)l_obj->data;
+            for (NvDsMetaList *l_user = obj->obj_user_meta_list; l_user != NULL; l_user = l_user->next) {
+                NvDsUserMeta *user_meta = (NvDsUserMeta *)l_user->data;
+                if (user_meta->base_meta.meta_type == NVDSINFER_TENSOR_OUTPUT_META) {
+                    NvDsInferTensorMeta *tensor_meta = (NvDsInferTensorMeta *)user_meta->user_meta_data;
+                    
+                    // for (unsigned int i = 0; i < tensor_meta->num_output_layers; i++) {
+                        // NvDsInferLayerInfo *info = &tensor_meta->output_layers_info[i];
+                        // info->buffer = tensor_meta->out_buf_ptrs_host[i];
+                        // if (tensor_meta->out_buf_ptrs_dev[i]) {
+                            // cudaMemcpy(tensor_meta->out_buf_ptrs_host[i], tensor_meta->out_buf_ptrs_dev[i],
+                                       // info->inferDims.numElements * 4, cudaMemcpyDeviceToHost);
+                        // }
+                    // }
+                    // float *outputCoverageBuffer = (float *)tensor_meta->output_layers_info[0].buffer;
+                   
+					/* int outputBBoxLayerIndex = -1;
+					for (unsigned int i = 0; i < tensor_meta->num_output_layers; i++) {
+						
+                             if (strstr( tensor_meta->output_layers_info[i].layerName, "prob") != nullptr) {
+                             outputBBoxLayerIndex = i;
+							 std::cout<<"#%%%%%%%%%%%%%%%%%%%%%"<<outputBBoxLayerIndex<<std::endl;
+        }
+	} */     
+       	NvDsInferDimsCHW outputBBoxDims;
+	//NvDsInferDimsNCHW  out;
+	getDimsCHWFromDims(outputBBoxDims,
+                       tensor_meta->output_layers_info[0].dims);
+
+	
+	//std::vector<std::string> * file_to_vector=InputData_To_Vector();
+	std::cout<<"c:"<<outputBBoxDims.c<<std::endl;  //OUTPUT_W
+	
+	std::cout<<"height!:"<<outputBBoxDims.h<<std::endl;
+	 std::cout<<"W:"<<outputBBoxDims.w<<std::endl;  //OUTPUT_W
+    
+                   // float *outputCoverageBuffer = (float *)tensor_meta->output_layers_info[0].buffer;
+                   float *outputCoverageBuffer = (float *)tensor_meta->out_buf_ptrs_host[0];
+				//std::cout<<"获取二级模型推理22222222222222222"<<appCtx->rec_output_W<<std::endl;
+					std::vector<int> preds;
+					
+                    /* std::copy(outputCoverageBuffer, outputCoverageBuffer + appCtx->sgieOutputDim,
+                              appCtx->embeds + count * appCtx->sgieOutputDim); */
+					for (int i = 0; i < appCtx->rec_output_W; i++) {
+						
+						int maxj = 0;
+						for (int j = 1; j < appCtx->sgieOutputDim; j++) {
+							if (outputCoverageBuffer[appCtx->rec_output_W * i + j] > outputCoverageBuffer[appCtx->rec_output_W * i + maxj]) maxj = j;
+						}
+						preds.push_back(maxj);
+					}
+					std::string text=strDecode(preds, false,appCtx->Dict);
+				   
+					//appCtx->predNames.push_back(text);
+					//std::cout<<"result:"<<appCtx->text_mes<<std::endl;
+					 NvDsInferAttribute attr;
+					 std::string descString;
+					 std::vector<NvDsInferAttribute> attrList;
+						bool attrFound = true;
+						attr.attributeIndex = 0;		
+						attr.attributeValue = 0;
+						attr.attributeConfidence =1.0;
+						float maxProbability = -254;
+ 
+	if(attrFound){
+		
+		//char *a=const_cast<char *>(text.c_str());
+		attr.attributeLabel =strdup(const_cast<char *>(text.c_str()));
+		//attr.attributeLabel = text.c_str();
+		attrList.push_back(attr);
+		if (attr.attributeLabel)
+              descString.append(attr.attributeLabel).append(" ");
+		std::cout<<"descStringtring:"<<descString<<std::endl;
+	}
+		//std::cout<<"descStringtring2
+                   /*  std::copy(outputCoverageBuffer, outputCoverageBuffer + appCtx->sgieOutputDim,
+                              appCtx->embeds + count * appCtx->sgieOutputDim);  */
+					// write_kitti_kafka_output(appCtx, batch_meta,attrList);
+					//std::cout<<"eBuffer:"<<outputCoverageBuffer[512]<<std::endl;	
+					 /* for(int i=0;i<512;i++)
+						 std::cout<<*(outputCoverageBuffer+i)<<","	; */
+                    count++;
+                    
                 }
             }
         }
-            
     }
-    frame_number++;
-    return GST_PAD_PROBE_OK;
+
+    appCtx->textCount = count;
 }
+
+
 
 
 /**
  * Buffer probe function after tracker.
  */
+/* static GstPadProbeReturn
+analytics_done_buf_prob (GstPad * pad, GstPadProbeInfo * info, gpointer u_data)
+{
+  NvDsInstanceBin *bin = (NvDsInstanceBin *) u_data;
+  guint index = bin->index;
+  AppCtx *appCtx = bin->appCtx;
+  GstBuffer *buf = (GstBuffer *) info->data;
+  NvDsBatchMeta *batch_meta = gst_buffer_get_nvds_batch_meta (buf);
+  if (!batch_meta) {
+    NVGSTDS_WARN_MSG_V ("Batch meta not found for buffer %p", buf);
+    return GST_PAD_PROBE_OK;
+  }
+  //std::cout<<"start!!!!!!!!!!!!!!!!!!!!!@@@@@@@@@@@@@"<<std::endl;
+    appCtx->predNames.clear();
+    get_sgie_tensor_output(appCtx, batch_meta);
+	
+	
+    if (appCtx->textCount > 0) { // in case use `interval` pgie property
+	
+        
+        //write_kitti_kafka_output(appCtx, batch_meta,appCtx->predNames);
+		
+        //appCtx->predSims.clear();
+		//float outx[appCtx->sgieOutputDim * appCtx->embedCount];
+		//int rowSize = ind % appCtx->embedCount == 0 ? appCtx->embedCount : ind % appCtx->embedCount;
+        // float *sims = new float[appCtx->embedCount * appCtx->knownEmbedCount];
+		
+	
+	  //
+		//cv::Mat similarity = (feature2 * feature.t());
+		
+		//for(int i=0;i<similarity.cols;i++){
+		   // cv::Mat sub=similarity.colRange(i,i+1).clone();
+		   // std::cout<<"matrixL:"<< sub<<std::endl;
+					
+        std::cout << "once ocr onceis:\n"  << std::endl;
+        
+		//遍历写法：
+		//double maxvalue=0, minvalue=0;
+	  //  cv::Point max_ind , min_ind;
+  // minMaxLoc 求取最大值
+     //Mat数组，最小值，最大值，最小值位置，最大值位置 
+      
+
+		//write_kitti_track_output(appCtx, batch_meta,appCtx->predNames,appCtx->predSims);
+        //appCtx->cossim->calculate(appCtx->embeds, appCtx->embedCount, sims);
+		//std::cout<<appCtx->predNames[0]<<std::endl;
+       return GST_PAD_PROBE_OK;
+    }
+	
+ 
+  
+  
+  if (appCtx->config.tracker_config.enable_past_frame)
+  {
+      write_kitti_past_track_output (appCtx, batch_meta);
+  }
+   
+  
+  if (appCtx->bbox_generated_post_analytics_cb)
+  {
+    appCtx->bbox_generated_post_analytics_cb (appCtx, buf, batch_meta, index);
+  }
+ 
+  return GST_PAD_PROBE_OK;
+} */
+
+ // Buffer probe function after tracker.
+ 
 static GstPadProbeReturn
-tracking_done_buf_prob (GstPad * pad, GstPadProbeInfo * info, gpointer u_data)
+analytics_done_buf_prob (GstPad * pad, GstPadProbeInfo * info, gpointer u_data)
 {
   NvDsInstanceBin *bin = (NvDsInstanceBin *) u_data;
   guint index = bin->index;
@@ -672,12 +1720,18 @@ tracking_done_buf_prob (GstPad * pad, GstPadProbeInfo * info, gpointer u_data)
   /*
    * Output KITTI labels with tracking ID if configured to do so.
    */
-  write_kitti_track_output(appCtx, batch_meta);
-
-  if (appCtx->primary_bbox_generated_cb)
-    appCtx->primary_bbox_generated_cb (appCtx, buf, batch_meta, index);
+  //write_kitti_track_output(appCtx, batch_meta);
+  if (appCtx->config.tracker_config.enable_past_frame)
+  {
+      write_kitti_past_track_output (appCtx, batch_meta);
+  }
+  if (appCtx->bbox_generated_post_analytics_cb)
+  {
+    appCtx->bbox_generated_post_analytics_cb (appCtx, buf, batch_meta, index);
+  }
   return GST_PAD_PROBE_OK;
 }
+
 
 static GstPadProbeReturn
 latency_measurement_buf_prob(GstPad * pad, GstPadProbeInfo * info, gpointer u_data)
@@ -707,6 +1761,133 @@ latency_measurement_buf_prob(GstPad * pad, GstPadProbeInfo * info, gpointer u_da
   return GST_PAD_PROBE_OK;
 }
 
+static GstPadProbeReturn
+demux_latency_measurement_buf_prob(GstPad * pad, GstPadProbeInfo * info, gpointer u_data)
+{
+  AppCtx *appCtx = (AppCtx *) u_data;
+  guint i = 0, num_sources_in_batch = 0;
+  if(nvds_enable_latency_measurement)
+  {
+    GstBuffer *buf = (GstBuffer *) info->data;
+    NvDsFrameLatencyInfo *latency_info = NULL;
+    g_mutex_lock (&appCtx->latency_lock);
+    latency_info = appCtx->latency_info;
+    g_print("\n************DEMUX BATCH-NUM = %d**************\n",demux_batch_num);
+    num_sources_in_batch = nvds_measure_buffer_latency(buf, latency_info);
+
+    for(i = 0; i < num_sources_in_batch; i++)
+    {
+      g_print("Source id = %d Frame_num = %d Frame latency = %lf (ms) \n",
+          latency_info[i].source_id,
+          latency_info[i].frame_num,
+          latency_info[i].latency);
+    }
+    g_mutex_unlock (&appCtx->latency_lock);
+    demux_batch_num++;
+  }
+
+  return GST_PAD_PROBE_OK;
+}
+
+static gboolean
+add_and_link_broker_sink (AppCtx * appCtx)
+{
+  NvDsConfig *config = &appCtx->config;
+  /** Only first instance_bin broker sink
+   * employed as there's only one analytics path for N sources
+   * NOTE: There shall be only one [sink] group
+   * with type=6 (NV_DS_SINK_MSG_CONV_BROKER)
+   * a) Multiple of them does not make sense as we have only
+   * one analytics pipe generating the data for broker sink
+   * b) If Multiple broker sinks are configured by the user
+   * in config file, only the first in the order of
+   * appearance will be considered
+   * and others shall be ignored
+   * c) Ideally it should be documented (or obvious) that:
+   * multiple [sink] groups with type=6 (NV_DS_SINK_MSG_CONV_BROKER)
+   * is invalid
+   */
+  NvDsInstanceBin *instance_bin = &appCtx->pipeline.instance_bins[0];
+  NvDsPipeline *pipeline = &appCtx->pipeline;
+
+  for (guint i = 0; i < config->num_sink_sub_bins; i++) {
+    if(config->sink_bin_sub_bin_config[i].type == NV_DS_SINK_MSG_CONV_BROKER)
+    {
+      if(!pipeline->common_elements.tee) {
+         NVGSTDS_ERR_MSG_V ("%s failed; broker added without analytics; check config file\n", __func__);
+         return FALSE;
+      }
+      /** add the broker sink bin to pipeline */
+      if(!gst_bin_add (GST_BIN (pipeline->pipeline), instance_bin->sink_bin.sub_bins[i].bin)) {
+        return FALSE;
+      }
+      /** link the broker sink bin to the common_elements tee
+       * (The tee after nvinfer -> tracker (optional) -> sgies (optional) block) */
+      if (!link_element_to_tee_src_pad (pipeline->common_elements.tee, instance_bin->sink_bin.sub_bins[i].bin)) {
+        return FALSE;
+      }
+    }
+  }
+  return TRUE;
+}
+
+static gboolean
+create_demux_pipeline (AppCtx * appCtx, guint index)
+{
+  gboolean ret = FALSE;
+  NvDsConfig *config = &appCtx->config;
+  NvDsInstanceBin *instance_bin = &appCtx->pipeline.demux_instance_bins[index];
+  GstElement *last_elem;
+  gchar elem_name[32];
+
+  instance_bin->index = index;
+  instance_bin->appCtx = appCtx;
+
+  g_snprintf (elem_name, 32, "processing_demux_bin_%d", index);
+  instance_bin->bin = gst_bin_new (elem_name);
+
+  if (!create_demux_sink_bin (config->num_sink_sub_bins,
+        config->sink_bin_sub_bin_config, &instance_bin->demux_sink_bin,
+        config->sink_bin_sub_bin_config[index].source_id)) {
+    goto done;
+  }
+
+  gst_bin_add (GST_BIN (instance_bin->bin), instance_bin->demux_sink_bin.bin);
+  last_elem = instance_bin->demux_sink_bin.bin;
+
+  if (config->osd_config.enable) {
+    if (!create_osd_bin (&config->osd_config, &instance_bin->osd_bin)) {
+      goto done;
+    }
+
+    gst_bin_add (GST_BIN (instance_bin->bin), instance_bin->osd_bin.bin);
+
+    NVGSTDS_LINK_ELEMENT (instance_bin->osd_bin.bin, last_elem);
+
+    last_elem = instance_bin->osd_bin.bin;
+  }
+
+  NVGSTDS_BIN_ADD_GHOST_PAD (instance_bin->bin, last_elem, "sink");
+  if (config->osd_config.enable) {
+
+    NVGSTDS_ELEM_ADD_PROBE (instance_bin->all_bbox_buffer_probe_id,
+        instance_bin->osd_bin.nvosd, "sink",
+        gie_processing_done_buf_prob, GST_PAD_PROBE_TYPE_BUFFER, instance_bin);
+		
+  } else {
+    NVGSTDS_ELEM_ADD_PROBE (instance_bin->all_bbox_buffer_probe_id,
+        instance_bin->demux_sink_bin.bin, "sink",
+        gie_processing_done_buf_prob, GST_PAD_PROBE_TYPE_BUFFER, instance_bin);
+  }
+
+  ret = TRUE;
+done:
+  if (!ret) {
+    NVGSTDS_ERR_MSG_V ("%s failed", __func__);
+  }
+  return ret;
+}
+
 /**
  * Function to add components to pipeline which are dependent on number
  * of streams. These components work on single buffer. If tiling is being
@@ -716,15 +1897,15 @@ latency_measurement_buf_prob(GstPad * pad, GstPadProbeInfo * info, gpointer u_da
 static gboolean
 create_processing_instance (AppCtx * appCtx, guint index)
 {
+
   gboolean ret = FALSE;
   NvDsConfig *config = &appCtx->config;
   NvDsInstanceBin *instance_bin = &appCtx->pipeline.instance_bins[index];
   GstElement *last_elem;
   gchar elem_name[32];
-
+ 
   instance_bin->index = index;
   instance_bin->appCtx = appCtx;
-
   g_snprintf (elem_name, 32, "processing_bin_%d", index);
   instance_bin->bin = gst_bin_new (elem_name);
 
@@ -747,28 +1928,26 @@ create_processing_instance (AppCtx * appCtx, guint index)
 
     last_elem = instance_bin->osd_bin.bin;
   }
-
+//g_print("xxxxxxxxxxxxxxxxxxxxxxxx2333333333321\n");
   NVGSTDS_BIN_ADD_GHOST_PAD (instance_bin->bin, last_elem, "sink");
   if (config->osd_config.enable) {
+	// g_print("xxxxxxxxxxxxxxxxxxxxxxxx2222222222221\n");
     NVGSTDS_ELEM_ADD_PROBE (instance_bin->all_bbox_buffer_probe_id,
         instance_bin->osd_bin.nvosd, "sink",
         gie_processing_done_buf_prob, GST_PAD_PROBE_TYPE_BUFFER, instance_bin);
 		NVGSTDS_ELEM_ADD_PROBE (instance_bin->all_bbox_buffer_probe_id,
         instance_bin->osd_bin.nvosd, "sink",
         tiler_src_pad_buffer_probe, GST_PAD_PROBE_TYPE_BUFFER, instance_bin);
-  } 
-  /* if (config->osd_config.enable) {
-    
-		NVGSTDS_ELEM_ADD_PROBE (instance_bin->all_bbox_buffer_probe_id,
-        instance_bin->osd_bin.nvosd, "sink",
-        tiler_src_pad_buffer_probe, GST_PAD_PROBE_TYPE_BUFFER, instance_bin);
-  } */
-  else {
+  } else {
+	  
     NVGSTDS_ELEM_ADD_PROBE (instance_bin->all_bbox_buffer_probe_id,
         instance_bin->sink_bin.bin, "sink",
         gie_processing_done_buf_prob, GST_PAD_PROBE_TYPE_BUFFER, instance_bin);
   }
-
+  
+  
+  //write_kitti_output (appCtx, batch_meta, buf);
+  
   ret = TRUE;
 done:
   if (!ret) {
@@ -785,10 +1964,11 @@ done:
 static gboolean
 create_common_elements (NvDsConfig * config, NvDsPipeline * pipeline,
     GstElement ** sink_elem, GstElement ** src_elem,
-    bbox_generated_callback primary_bbox_generated_cb)
+    bbox_generated_callback bbox_generated_post_analytics_cb)
 {
   gboolean ret = FALSE;
   *sink_elem = *src_elem = NULL;
+
   if (config->primary_gie_config.enable) {
     if (config->num_secondary_gie_sub_bins > 0) {
       if (!create_secondary_gie_bin (config->num_secondary_gie_sub_bins,
@@ -808,6 +1988,27 @@ create_common_elements (NvDsConfig * config, NvDsPipeline * pipeline,
       }
       *sink_elem = pipeline->common_elements.secondary_gie_bin.bin;
     }
+  }
+
+  if (config->dsanalytics_config.enable) {
+    // Create dsanalytics element bin and set properties
+    if (!create_dsanalytics_bin (&config->dsanalytics_config,
+            &pipeline->common_elements.dsanalytics_bin)) {
+      g_print ("creating dsanalytics bin failed\n");
+      goto done;
+    }
+    // Add dsanalytics bin to instance bin
+    gst_bin_add (GST_BIN (pipeline->pipeline), pipeline->common_elements.dsanalytics_bin.bin);
+
+      if (!*src_elem) {
+        *src_elem = pipeline->common_elements.dsanalytics_bin.bin;
+      }
+      if (*sink_elem) {
+        NVGSTDS_LINK_ELEMENT (pipeline->common_elements.dsanalytics_bin.bin,
+            *sink_elem);
+      }
+    // Set this bin as the last element
+    *sink_elem = pipeline->common_elements.dsanalytics_bin.bin;
   }
 
   if (config->tracker_config.enable) {
@@ -843,31 +2044,70 @@ create_common_elements (NvDsConfig * config, NvDsPipeline * pipeline,
     if (!*src_elem) {
       *src_elem = pipeline->common_elements.primary_gie_bin.bin;
     }
-    NVGSTDS_ELEM_ADD_PROBE (pipeline->common_elements.
+    /* NVGSTDS_ELEM_ADD_PROBE (pipeline->common_elements.
         primary_bbox_buffer_probe_id,
         pipeline->common_elements.primary_gie_bin.bin, "src",
         gie_primary_processing_done_buf_prob, GST_PAD_PROBE_TYPE_BUFFER,
-        pipeline->common_elements.appCtx);
+        pipeline->common_elements.appCtx); */
+  } 
+  //std::cout<<"结束主推理"<<std::endl;
+  if(*src_elem) {
+    NVGSTDS_ELEM_ADD_PROBE (pipeline->common_elements.
+          primary_bbox_buffer_probe_id,
+          *src_elem, "src",
+          analytics_done_buf_prob, GST_PAD_PROBE_TYPE_BUFFER,
+          &pipeline->common_elements);
+
+    /* Add common message converter */
+    if (config->msg_conv_config.enable) {
+      NvDsSinkMsgConvBrokerConfig *convConfig = &config->msg_conv_config;
+      pipeline->common_elements.msg_conv = gst_element_factory_make (NVDS_ELEM_MSG_CONV, "common_msg_conv");
+      if (!pipeline->common_elements.msg_conv) {
+        NVGSTDS_ERR_MSG_V ("Failed to create element 'common_msg_conv'");
+        goto done;
+      }
+
+      g_object_set (G_OBJECT (pipeline->common_elements.msg_conv),
+                    "config", convConfig->config_file_path,
+                    "msg2p-lib", (convConfig->conv_msg2p_lib ? convConfig->conv_msg2p_lib : "null"),
+                    "payload-type", convConfig->conv_payload_type,
+                    "comp-id", convConfig->conv_comp_id,
+                    "debug-payload-dir", convConfig->debug_payload_dir,
+                    "multiple-payloads", convConfig->multiple_payloads, NULL);
+
+      gst_bin_add (GST_BIN (pipeline->pipeline),
+                   pipeline->common_elements.msg_conv);
+
+      NVGSTDS_LINK_ELEMENT (*src_elem, pipeline->common_elements.msg_conv);
+      *src_elem = pipeline->common_elements.msg_conv;
+    }
+    pipeline->common_elements.tee = gst_element_factory_make (NVDS_ELEM_TEE, "common_analytics_tee");
+    if (!pipeline->common_elements.tee) {
+      NVGSTDS_ERR_MSG_V ("Failed to create element 'common_analytics_tee'");
+      goto done;
+    }
+
+    gst_bin_add (GST_BIN (pipeline->pipeline),
+          pipeline->common_elements.tee);
+
+    NVGSTDS_LINK_ELEMENT (*src_elem, pipeline->common_elements.tee);
+    *src_elem = pipeline->common_elements.tee;
   }
 
-  if (config->primary_gie_config.enable) {
-    if (config->tracker_config.enable) {
-      NVGSTDS_ELEM_ADD_PROBE (pipeline->common_elements.
-          primary_bbox_buffer_probe_id,
-          pipeline->common_elements.tracker_bin.bin, "src",
-          tracking_done_buf_prob, GST_PAD_PROBE_TYPE_BUFFER,
-          &pipeline->common_elements);
-    } else {
-      NVGSTDS_ELEM_ADD_PROBE (pipeline->common_elements.
-          primary_bbox_buffer_probe_id,
-          pipeline->common_elements.primary_gie_bin.bin, "src",
-          tracking_done_buf_prob, GST_PAD_PROBE_TYPE_BUFFER,
-          &pipeline->common_elements);
-    }
-  }
   ret = TRUE;
 done:
   return ret;
+}
+
+static gboolean is_sink_available_for_source_id(NvDsConfig *config, guint source_id) {
+  for (guint j = 0; j < config->num_sink_sub_bins; j++) {
+    if (config->sink_bin_sub_bin_config[j].enable &&
+        config->sink_bin_sub_bin_config[j].source_id == source_id &&
+        config->sink_bin_sub_bin_config[j].link_to_demux == FALSE) {
+      return TRUE;
+    }
+  }
+  return FALSE;
 }
 
 /**
@@ -875,7 +2115,7 @@ done:
  */
 gboolean
 create_pipeline (AppCtx * appCtx,
-    bbox_generated_callback primary_bbox_generated_cb,
+    bbox_generated_callback bbox_generated_post_analytics_cb,
     bbox_generated_callback all_bbox_generated_cb, perf_callback perf_cb,
     overlay_graphics_callback overlay_graphics_cb)
 {
@@ -893,7 +2133,7 @@ create_pipeline (AppCtx * appCtx,
   _dsmeta_quark = g_quark_from_static_string (NVDS_META_STRING);
 
   appCtx->all_bbox_generated_cb = all_bbox_generated_cb;
-  appCtx->primary_bbox_generated_cb = primary_bbox_generated_cb;
+  appCtx->bbox_generated_post_analytics_cb = bbox_generated_post_analytics_cb;
   appCtx->overlay_graphics_cb = overlay_graphics_cb;
 
   if (config->osd_config.num_out_buffers < 8) {
@@ -908,7 +2148,6 @@ create_pipeline (AppCtx * appCtx,
 
   bus = gst_pipeline_get_bus (GST_PIPELINE (pipeline->pipeline));
   pipeline->bus_id = gst_bus_add_watch (bus, bus_callback, appCtx);
-  gst_bus_set_sync_handler (bus, bus_sync_handler, appCtx, NULL);
   gst_object_unref (bus);
 
   if (config->file_loop) {
@@ -927,19 +2166,12 @@ create_pipeline (AppCtx * appCtx,
         /* Set the "qos" property of sink, if not explicitly specified in the
            config. */
         if (!sink_config->render_config.qos_value_specified) {
-          /* QoS events should be generated by sink always in case of live sources
-             or with synchronous playback for non-live sources. */
-          if (config->streammux_config.live_source || sink_config->render_config.sync) {
-            sink_config->render_config.qos = TRUE;
-          } else {
-            sink_config->render_config.qos = FALSE;
-          }
+          sink_config->render_config.qos = FALSE;
         }
       default:
         break;
     }
   }
-
   /*
    * Add muxer and < N > source components to the pipeline based
    * on the settings in configuration file.
@@ -950,15 +2182,92 @@ create_pipeline (AppCtx * appCtx,
   gst_bin_add (GST_BIN (pipeline->pipeline), pipeline->multi_src_bin.bin);
 
 
-  if (config->streammux_config.is_parsed)
-    set_streammux_properties (&config->streammux_config,
-        pipeline->multi_src_bin.streammux);
+  if (config->streammux_config.is_parsed){
+    if(!set_streammux_properties (&config->streammux_config,
+        pipeline->multi_src_bin.streammux)){
+         NVGSTDS_WARN_MSG_V("Failed to set streammux properties");
+    }
+  }
+
 
   if(appCtx->latency_info == NULL)
   {
     appCtx->latency_info = (NvDsFrameLatencyInfo *)
       calloc(1, config->streammux_config.batch_size *
           sizeof(NvDsFrameLatencyInfo));
+  }
+
+  /** a tee after the tiler which shall be connected to sink(s) */
+  pipeline->tiler_tee = gst_element_factory_make (NVDS_ELEM_TEE, "tiler_tee");
+  if (!pipeline->tiler_tee) {
+    NVGSTDS_ERR_MSG_V ("Failed to create element 'tiler_tee'");
+    goto done;
+  }
+  gst_bin_add (GST_BIN (pipeline->pipeline), pipeline->tiler_tee);
+
+  /** Tiler + Demux in Parallel Use-Case */
+  if (config->tiled_display_config.enable == NV_DS_TILED_DISPLAY_ENABLE_WITH_PARALLEL_DEMUX)
+  {
+    pipeline->demuxer =
+        gst_element_factory_make (NVDS_ELEM_STREAM_DEMUX, "demuxer");
+    if (!pipeline->demuxer) {
+      NVGSTDS_ERR_MSG_V ("Failed to create element 'demuxer'");
+      goto done;
+    }
+    gst_bin_add (GST_BIN (pipeline->pipeline), pipeline->demuxer);
+
+    /** NOTE:
+     * demux output is supported for only one source
+     * If multiple [sink] groups are configured with
+     * link_to_demux=1, only the first [sink]
+     * shall be constructed for all occurences of
+     * [sink] groups with link_to_demux=1
+     */
+    {
+      gchar pad_name[16];
+      GstPad *demux_src_pad;
+
+      i = 0;
+      if (!create_demux_pipeline (appCtx, i)) {
+        goto done;
+      }
+
+      for (i=0; i < config->num_sink_sub_bins; i++)
+      {
+        if (config->sink_bin_sub_bin_config[i].link_to_demux == TRUE)
+        {
+          g_snprintf (pad_name, 16, "src_%02d", config->sink_bin_sub_bin_config[i].source_id);
+          break;
+        }
+      }
+
+      if (i >= config->num_sink_sub_bins)
+      {
+        g_print ("\n\nError : sink for demux (use link-to-demux-only property) is not provided in the config file\n\n");
+        goto done;
+      }
+
+      i = 0;
+
+      gst_bin_add (GST_BIN (pipeline->pipeline),
+          pipeline->demux_instance_bins[i].bin);
+
+      demux_src_pad = gst_element_get_request_pad (pipeline->demuxer, pad_name);
+      NVGSTDS_LINK_ELEMENT_FULL (pipeline->demuxer, pad_name,
+          pipeline->demux_instance_bins[i].bin, "sink");
+      gst_object_unref (demux_src_pad);
+
+      NVGSTDS_ELEM_ADD_PROBE(latency_probe_id,
+          appCtx->pipeline.demux_instance_bins[i].demux_sink_bin.bin,
+          "sink",
+          demux_latency_measurement_buf_prob, GST_PAD_PROBE_TYPE_BUFFER,
+          appCtx);
+      latency_probe_id = latency_probe_id;
+    }
+
+    last_elem = pipeline->demuxer;
+    link_element_to_tee_src_pad (pipeline->tiler_tee, last_elem);
+    last_elem = pipeline->tiler_tee;
   }
 
   if (config->tiled_display_config.enable) {
@@ -994,8 +2303,18 @@ create_pipeline (AppCtx * appCtx,
     gst_bin_add (GST_BIN (pipeline->pipeline), pipeline->tiled_display_bin.bin);
     NVGSTDS_LINK_ELEMENT (pipeline->tiled_display_bin.bin, last_elem);
     last_elem = pipeline->tiled_display_bin.bin;
-  } else {
 
+    link_element_to_tee_src_pad (pipeline->tiler_tee, pipeline->tiled_display_bin.bin);
+    last_elem = pipeline->tiler_tee;
+
+    NVGSTDS_ELEM_ADD_PROBE (latency_probe_id,
+      pipeline->instance_bins->sink_bin.sub_bins[0].sink, "sink",
+      latency_measurement_buf_prob, GST_PAD_PROBE_TYPE_BUFFER,
+      appCtx);
+    latency_probe_id = latency_probe_id;
+  }
+  else
+  {
     /*
      * Create demuxer only if tiled display is disabled.
      */
@@ -1007,43 +2326,52 @@ create_pipeline (AppCtx * appCtx,
     }
     gst_bin_add (GST_BIN (pipeline->pipeline), pipeline->demuxer);
 
-    for (i = 0; i < config->num_source_sub_bins; i++) {
+    for (i = 0; i < config->num_source_sub_bins; i++)
+    {
       gchar pad_name[16];
-      gboolean create_instance = FALSE;
       GstPad *demux_src_pad;
-      guint j;
 
       /* Check if any sink has been configured to render/encode output for
        * source index `i`. The processing instance for that source will be
        * created only if atleast one sink has been configured as such.
        */
-      for (j = 0; j < config->num_sink_sub_bins; j++) {
-        if (config->sink_bin_sub_bin_config[j].enable &&
-            config->sink_bin_sub_bin_config[j].source_id == i) {
-          create_instance = TRUE;
+      if (!is_sink_available_for_source_id(config, i))
+        continue;
+
+      if (!create_processing_instance(appCtx, i))
+      {
+        goto done;
+      }
+      gst_bin_add(GST_BIN(pipeline->pipeline),
+                  pipeline->instance_bins[i].bin);
+
+      g_snprintf(pad_name, 16, "src_%02d", i);
+      demux_src_pad = gst_element_get_request_pad(pipeline->demuxer, pad_name);
+      NVGSTDS_LINK_ELEMENT_FULL(pipeline->demuxer, pad_name,
+                                pipeline->instance_bins[i].bin, "sink");
+      gst_object_unref(demux_src_pad);
+
+      for (int k = 0; k < MAX_SINK_BINS;k++) {
+        if(pipeline->instance_bins[i].sink_bin.sub_bins[k].sink){
+          NVGSTDS_ELEM_ADD_PROBE(latency_probe_id,
+              pipeline->instance_bins[i].sink_bin.sub_bins[k].sink, "sink",
+              latency_measurement_buf_prob, GST_PAD_PROBE_TYPE_BUFFER,
+              appCtx);
           break;
         }
       }
 
-      if (!create_instance)
-        continue;
-
-      if (!create_processing_instance (appCtx, i)) {
-        goto done;
-      }
-      gst_bin_add (GST_BIN (pipeline->pipeline),
-          pipeline->instance_bins[i].bin);
-
-      g_snprintf (pad_name, 16, "src_%02d", i);
-      demux_src_pad = gst_element_get_request_pad (pipeline->demuxer, pad_name);
-      NVGSTDS_LINK_ELEMENT_FULL (pipeline->demuxer, pad_name,
-          pipeline->instance_bins[i].bin, "sink");
-      gst_object_unref (demux_src_pad);
+      latency_probe_id = latency_probe_id;
     }
-
     last_elem = pipeline->demuxer;
   }
-  fps_pad = gst_element_get_static_pad (last_elem, "sink");
+
+  if (config->tiled_display_config.enable == NV_DS_TILED_DISPLAY_DISABLE) {
+    fps_pad = gst_element_get_static_pad (pipeline->demuxer, "sink");
+  }
+  else {
+    fps_pad = gst_element_get_static_pad (pipeline->tiled_display_bin.bin, "sink");
+  }
 
   pipeline->common_elements.appCtx = appCtx;
   // Decide where in the pipeline the element should be added and add only if
@@ -1065,7 +2393,11 @@ create_pipeline (AppCtx * appCtx,
   }
   // create and add common components to pipeline.
   if (!create_common_elements (config, pipeline, &tmp_elem1, &tmp_elem2,
-          primary_bbox_generated_cb)) {
+          bbox_generated_post_analytics_cb)) {
+    goto done;
+  }
+
+  if(!add_and_link_broker_sink(appCtx)) {
     goto done;
   }
 
@@ -1082,15 +2414,24 @@ create_pipeline (AppCtx * appCtx,
     appCtx->perf_struct.context = appCtx;
     enable_perf_measurement (&appCtx->perf_struct, fps_pad,
         pipeline->multi_src_bin.num_bins,
-        config->perf_measurement_interval_sec, perf_cb);
+        config->perf_measurement_interval_sec,
+        config->multi_source_config[0].dewarper_config.num_surfaces_per_frame,
+        perf_cb);
   }
-  //gst_object_unref (fps_pad);
 
-  NVGSTDS_ELEM_ADD_PROBE (latency_probe_id,
-      pipeline->instance_bins->sink_bin.sub_bins[0].sink, "sink",
-      latency_measurement_buf_prob, GST_PAD_PROBE_TYPE_BUFFER,
-      appCtx);
   latency_probe_id = latency_probe_id;
+
+  if (config->num_message_consumers) {
+    for (i = 0; i < config->num_message_consumers; i++) {
+      appCtx->c2d_ctx[i] = start_cloud_to_device_messaging (
+                                &config->message_consumer_config[i], NULL,
+                                &appCtx->pipeline.multi_src_bin);
+      if (appCtx->c2d_ctx[i] == NULL) {
+        NVGSTDS_ERR_MSG_V ("Failed to create message consumer");
+        goto done;
+      }
+    }
+  }
 
   GST_DEBUG_BIN_TO_DOT_FILE_WITH_TS (GST_BIN (appCtx->pipeline.pipeline),
       GST_DEBUG_GRAPH_SHOW_ALL, "ds-app-null");
@@ -1136,6 +2477,7 @@ destroy_pipeline (AppCtx * appCtx)
 
   g_mutex_lock (&appCtx->app_lock);
   if (appCtx->pipeline.pipeline) {
+    destroy_smart_record_bin (&appCtx->pipeline.multi_src_bin);
     bus = gst_pipeline_get_bus (GST_PIPELINE (appCtx->pipeline.pipeline));
 
     while (TRUE) {
@@ -1174,6 +2516,7 @@ destroy_pipeline (AppCtx * appCtx)
     appCtx->latency_info = NULL;
   }
 
+  destroy_sink_bin ();
   g_mutex_clear(&appCtx->latency_lock);
 
   if (appCtx->pipeline.pipeline) {
@@ -1181,6 +2524,13 @@ destroy_pipeline (AppCtx * appCtx)
     gst_bus_remove_watch (bus);
     gst_object_unref (bus);
     gst_object_unref (appCtx->pipeline.pipeline);
+  }
+
+  if (config->num_message_consumers) {
+    for (i = 0; i < config->num_message_consumers; i++) {
+      if (appCtx->c2d_ctx[i])
+        stop_cloud_to_device_messaging (appCtx->c2d_ctx[i]);
+    }
   }
 }
 
