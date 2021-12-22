@@ -4,11 +4,11 @@ perf-measurement-interval-sec=5
 #gie-kitti-output-dir=./savelog
 
 [tiled-display]
-enable=1
+enable=0
 rows=1
 columns=1
-width=1920
-height=1080
+width=1280
+height=720
 gpu-id=0
 #(0): nvbuf-mem-default - Default memory allocated, specific to particular platform
 #(1): nvbuf-mem-cuda-pinned - Allocate Pinned/Host cuda memory applicable for Tesla
@@ -22,23 +22,26 @@ enable=1
 #Type - 1=CameraV4L2 2=URI 3=MultiURI
 type=2
 num-sources=1
-#uri=file://1.mp4
-uri=file://../../img_face.mp4
-#drop-frame-interval=5
+uri=file:///home/project/test_4k.mp4
+#file:///home/project/new2022out4.mp4
+#file:///home/project/long4k.mp4
+#uri=file://../../img_face.mp4
+drop-frame-interval=2
 cudadec-memtype=0
 gpu-id=0
 
 [sink0]
 enable=1
+gpu-id=0
 type=3
 #1=mp4 2=mkv
 container=1
 #1=h264 2=h265
-codec=1
+codec=2
 sync=0
-iframeinterval=10
+#iframeinterval=10
 bitrate=4000000
-output-file=./out824.mp4
+output-file=out2021.mp4
 #rtsp-port=8554
 source-id=0
 
@@ -102,8 +105,8 @@ text-color=1;1;1;1;
 text-bg-color=0.3;0.3;0.3;1
 font=Serif
 show-clock=0
-clock-x-offset=800
-clock-y-offset=820
+clock-x-offset=200
+clock-y-offset=200
 clock-text-size=12
 clock-color=1;0;0;0
 nvbuf-memory-type=0
@@ -139,7 +142,7 @@ config-file=centerface.txt
 
 [secondary-gie] 
 enable=1
-config-file=arcface.txt
+config-file=facenet.txt
 gpu-id=0
 batch-size=1
 gie-unique-id=2

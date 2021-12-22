@@ -1,18 +1,16 @@
 {
     "input_camera": "./1.mp4",
     "input_takeCrop": false,
-    "input_embeddingsFile": "./save.json",
-    "input_numImagesFile": "./a.txt",
+    "input_embeddingsFile": "facenet.json",
+    "input_numImagesFile": 25,
     "det_threshold_nms": 0.4,
     "det_threshold_bbox": 0.6,
-    "det_maxFacesPerScene": 5,
-    "rec_inputShape": [3, 112, 112],
+    "det_maxFacesPerScene": 30,
+    "rec_inputShape": [3, 160, 160],
     "rec_outputDim": 512,
     "rec_knownPersonThreshold": 0.65,
-    "out_visualize": true,
-    "gen_imgSource": "",
-    "gen_imgIsCropped": true,
-    "send_request": false
- 
-    
+    "kafka_message": "localhost:9092",
+    "kafka_topic": "face-test-deepstream", 
+	"send_mess": true, 
+    "gen_imgIsCropped": true
 }
