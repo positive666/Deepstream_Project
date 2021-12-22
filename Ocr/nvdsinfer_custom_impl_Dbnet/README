@@ -1,0 +1,94 @@
+################################################################################
+# Copyright (c) 2019, NVIDIA CORPORATION.  All rights reserved.
+#
+# NVIDIA Corporation and its licensors retain all intellectual property
+# and proprietary rights in and to this software, related documentation
+# and any modifications thereto.  Any use, reproduction, disclosure or
+# distribution of this software and related documentation without an express
+# license agreement from NVIDIA Corporation is strictly prohibited.
+#
+################################################################################
+
+This sample shows how to integrate a detector Model like Yolo having layers
+supported through IPlugin interface by TensorRT and with custom output layer
+parsing for detected objects with DeepStreamSDK. The sample uses the
+IPluginFactory interface to create specific layers in Yolo and configure yolo
+plugin provided by TensorRT. This sample demonstrates how to reconstruct
+user-defined TensorRT layers from engine file in runtime.
+
+--------------------------------------------------------------------------------
+Sample contents:
+- deepstream_app_config_yolo[V3,V3_tiny,V2,V2_tiny,tlt].txt - DeepStream reference
+  app configuration file for using YoloV2/yoloV2-tiny/yolo/yolo-tiny/tlt model
+  as the primary detector.
+- config_infer_primary_yolo[V3,V3_tiny,V2,V2_tiny,tlt].txt - Configuration file for the GStreamer
+  nvinfer plugin for the Yolo detector model.
+- yolov3-calibration.table.trt7.0 - yoloV3 INT8 calibration binary on TensorRT 7.0+
+- nvdsinfer_custom_impl_Yolo/nvdsinfer_yolo_engine.cpp -
+  Implementation of 'NvDsInferCreateModelParser'/IModelParser for nvdsinfer to
+  parse custom models. Alternatively, also contains implementation of
+  'NvDsInferYoloCudaEngineGet' for nvdsinfer to directly create cuda engine.
+  To use the 'NvDsInferYoloCudaEngineGet' interface, enable the macro
+  USE_CUDA_ENGINE_GET_API in nvdsinfer_yolo_engine.cpp
+- nvdsinfer_custom_impl_Yolo/nvdsparsebbox_Yolo.cpp - Output layer
+  parsing function for detected objects for the Yolo model.
+- nvdsinfer_custom_impl_Yolo/yoloPlugins.h -
+  Declaration of YoloLayerV3 and YoloLayerV3PluginCreator.
+- nvdsinfer_custom_impl_Yolo/yoloPlugins.cpp -
+  Implementation of YoloLayerV3 and YoloLayerV3PluginCreator.
+- nvdsinfer_custom_impl_Yolo/kernels.cu - Implementation of cuda kernels for
+- nvdsinfer_custom_impl_Yolo/trt_utils.h - Utilities to setup tensorRT networks
+- nvdsinfer_custom_impl_Yolo/trt_utils.cpp - Implementation of Utilities to setup
+   tensorRT networks
+- nvdsinfer_custom_impl_Yolo/yolo.h - Interface to create Yolo Cuda-Engine
+- nvdsinfer_custom_impl_Yolo/yolo.cpp - Implementation to create Yolo Cuda-Engine
+
+--------------------------------------------------------------------------------
+Pre-requisites:
+- Download yolo config and weights files
+  $ ./prebuild.sh
+- Set correct yolo config/weights file in config_infer_primary_yolo[...].txt.
+    custom-network-config # path to yolo config
+    model-file # path to yolo weights
+- Enable INT8 precision detection if there is a calibration cache file, update
+  config_infer_primary_yolo[...].txt.
+    int8-calib-file=yolo[...]-calibration.table.trt5.1
+- Other INT8 precision calibration table need to be calibrated by user.
+- The yolo-tlt sample makes use of a few TensorRT OSS plugins. Download the
+  TensorRT OSS repo (https://github.com/NVIDIA/TensorRT/) and checkout the
+  'release/7.0' branch. Follow the instructions in the README to build the
+  plugin library 'libnvinfer_plugin.so.7.0.0' corresponding to your dGPU/Jetson
+  platform. This library needs to be used with LD_PRELOAD to let nvinfer plugin
+  access the TRT OSS plugin layers.
+- Set the path of the etlt model (tlt-encoded-model) and the tlt model key
+  (tlt-model-key) in config_infer_primary_yolo_tlt.txt before running the sample.
+
+Note:
+- There is a quality regression of masks in yolov3-tiny.cfg, please see comments
+  https://github.com/pjreddie/darknet/commit/f86901f6177dfc6116360a13cc06ab680e0c86b0#r30200016
+  Before official fix in yolov3-tiny.weights, end users can revert the masks to
+  [1, 2, 3]. There is also a hardcode of masks in nvdsparsebbox_Yolo.cpp.
+
+--------------------------------------------------------------------------------
+Compile the custom library:
+  # Based on the API to use 'NvDsInferCreateModelParser' or 'NvDsInferCudaEngineGet'
+  # set the macro USE_CUDA_ENGINE_GET_API to 0 or 1 in
+  # nvdsinfer_custom_impl_Yolo/nvdsinfer_yolo_engine.cpp
+
+  # Export correct CUDA version (e.g. 10.2, 10.1)
+  $ export CUDA_VER=10.2
+  $ make -C nvdsinfer_custom_impl_Yolo
+
+--------------------------------------------------------------------------------
+Run the sample:
+The "nvinfer" config file config_infer_primary_yolo.txt specifies the path to
+the custom library and the custom output parsing function through the properties
+"custom-lib-path" and "parse-bbox-func-name" respectively.
+The first-time a "model_b1_int8.engine" would be generated as the engine-file
+
+- With deepstream-app
+  $ deepstream-app -c deepstream_app_config_yoloV3.txt
+  $ deepstream-app -c deepstream_app_config_yoloV3_tiny.txt
+  $ deepstream-app -c deepstream_app_config_yoloV2.txt
+  $ deepstream-app -c deepstream_app_config_yoloV2_tiny.txt
+  $ LD_PRELOAD=<path-to-TRT-OSS-libnvinfer_plugin.so.7.0.0> deepstream-app -c deepstream_app_config_yolo_tlt.txt

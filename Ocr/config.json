@@ -2,7 +2,6 @@
     
     
     "input_Dict": "./char_std_6862.txt",
-  
     "det_threshold_bbox": 0.6,
     "det_maxFacesPerScene": 50,
     "rec_outputDim": 6862,
@@ -10,7 +9,7 @@
     "rec_knownPersonThreshold": 0.65,
     "kafka_message": "localhost:9092",
     "kafka_topic": "ocr-test-deepstream", 
-    "send_request": false
+    "send_flag": false
  
     
 }

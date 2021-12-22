@@ -37,18 +37,21 @@
 # properties.
 
 [property]
-gpu-id=1
+gpu-id=0
 
 #0=RGB, 1=BGR
 model-color-format=2
 
 #labelfile-path=char_std_5990.txt
+batch-size=1
 
-
-
-#int8-calib-file=yolov3-calibration.table.trt5.1
+model-engine-file=/home/project/crnn.pytorch.tensorrt.chinese-master/weights/crnn_cn.engine
+#/home/project/chineseocr/crnn.engine
+#/home/project/chineseocr/new_crnn.engine
+#/home/project/Deepstream_Project/tensorrtx/tensorrtx/crnn/build/crnn.engine
+#model-engine-file=/home/project/crnn.pytorch.tensorrt.chinese-master/weights/crnn_cn.engine
 ## 0=FP32, 1=INT8, 2=FP16 mode
-network-mode=0
+network-mode=2
 process-mode=2
 operate-on-gie-id=1
 gie-unique-id=2
@@ -59,8 +62,9 @@ is-classifier=1
 #100.98f, 146.88f, 143.31f
 #offsets=100.98;146.88;143.31
 offsets=127.5
+
 maintain-aspect-ratio=1
-output-blob-names=58
+output-blob-names=prob
 parse-classifier-func-name = NvDsInferParseCustomText_new
 #parse-bbox-func-name=NvDsInferParseCustomText_new
 custom-lib-path=nvdsinfer_custom_text/libnvdsinfer_custom_impl_text.so
@@ -68,14 +72,14 @@ custom-lib-path=nvdsinfer_custom_text/libnvdsinfer_custom_impl_text.so
 
 
 
-input-object-min-width=10
-input-object-min-height=15
-input-object-max-width=800
-input-object-max-height=600
+input-object-min-width=100
+input-object-min-height=32
+input-object-max-width=512
+input-object-max-height=256
 
 
-#net-scale-factor=0.03
-net-scale-factor=0.0078
+#net-scale-factor=1.0
+net-scale-factor=0.00784314
 
 
 

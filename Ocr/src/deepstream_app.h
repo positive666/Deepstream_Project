@@ -163,6 +163,7 @@ struct _AppCtx
   guint ota_watch_desc;
   
   int embedCount;
+  bool send_flag;
   rd_kafka_t *rk;        /* Producer instance handle */
   rd_kafka_conf_t *conf; /* Temporary configuration object */
   const char *brokers;   /* Argument: broker list */

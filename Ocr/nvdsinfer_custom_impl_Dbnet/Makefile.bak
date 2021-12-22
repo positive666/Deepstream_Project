@@ -20,7 +20,7 @@
 # DEALINGS IN THE SOFTWARE.
 ################################################################################
 
-CUDA_VER?=11.1
+CUDA_VER?=10.1
 ifeq ($(CUDA_VER),)
   $(error "CUDA_VER is not set")
 endif
@@ -28,16 +28,19 @@ CC:= g++
 NVCC:=/usr/local/cuda-$(CUDA_VER)/bin/nvcc
 
 CFLAGS:= -Wall -g -std=c++11 -shared -fPIC
-CFLAGS+= -I/opt/nvidia/deepstream/deepstream-5.1/sources/includes/ -I/usr/local/cuda-$(CUDA_VER)/include
-#CFLAGS+=-I../../includes -I/home/dell/Pictures/TensorRT-7.0.0.11/include
-#CFLAGS+=-I../../includes -I/opt/nvidia/deepstream/deepstream-5.0/sources/includes
-LIBS:= -L/usr/local/cuda-11.1/lib64 -L/usr/lib/x86_64-linux-gnu -L/opt/nvidia/deepstream/deepstream-5.1/lib/ -lnvinfer_plugin -lnvinfer -lnvparsers -L/usr/local/cuda-$(CUDA_VER)/lib64 -lcudart -lcublas 
+CFLAGS+= -I../../includes -I/usr/local/cuda-$(CUDA_VER)/include -I/home/data/installation/TensorRT-5.1.5.0/include
+
+LIBS:= -lnvinfer_plugin -lnvinfer -lnvparsers -L/usr/local/cuda-$(CUDA_VER)/lib64 -lcudart -lcublas -lstdc++fs -L/home/data/installation/TensorRT-5.1.5.0/lib
 LFLAGS:= -shared -Wl,--start-group $(LIBS) -Wl,--end-group
 
 INCS:= $(wildcard *.h)
-SRCFILES:= nvdsparse_text.cpp   
-           
-TARGET_LIB:= libnvdsinfer_custom_impl_text.so
+SRCFILES:= nvdsinfer_yolo_engine.cpp \
+           nvdsparsebbox_Yolo.cpp   \
+           yoloPlugins.cpp    \
+           trt_utils.cpp              \
+           yolo.cpp              \
+           kernels.cu
+TARGET_LIB:= libnvdsinfer_custom_impl_Yolo.so
 
 TARGET_OBJS:= $(SRCFILES:.cpp=.o)
 TARGET_OBJS:= $(TARGET_OBJS:.cu=.o)

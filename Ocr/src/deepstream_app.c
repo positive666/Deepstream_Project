@@ -1119,6 +1119,84 @@ component_id_compare_func (gconstpointer a, gconstpointer b)
   return 0;
 }
 
+
+static void kafka_send(cJSON * root ,AppCtx  *appCtx){
+	
+	signal(SIGINT, stop);
+	
+	
+	char *buf = cJSON_PrintUnformatted(root);
+	//memcpy(buf,send,count);
+	rd_kafka_resp_err_t err;
+	
+    size_t len = strlen(buf); 
+     
+	
+     	if(buf[len-1] == '\n')
+     		buf[--len] = '\0';
+
+     	if(len == 0){
+            /*轮询用于事件的kafka handle，
+            事件将导致应用程序提供的回调函数被调用
+            第二个参数是最大阻塞时间，如果设为0，将会是非阻塞的调用*/
+			
+     		rd_kafka_poll(appCtx->rk, 1);
+     		
+     	}
+
+    //retry:  
+	         if (rd_kafka_produce(  
+                    /* Topic object */  
+                    appCtx->rkt,  
+                    /*使用内置的分区来选择分区*/  
+                    RD_KAFKA_PARTITION_UA,  
+                    /*生成payload的副本*/  
+                    RD_KAFKA_MSG_F_COPY,  
+                    /*消息体和长度*/  
+                    buf, len,  
+                    /*可选键及其长度*/  
+                    NULL, 0,  
+                    NULL) == -1){  
+            fprintf(stderr,   
+                "%% Failed to produce to topic %s: %s\n",   
+                rd_kafka_topic_name(appCtx->rkt),  
+                rd_kafka_err2str(rd_kafka_last_error()));  
+  
+            if (rd_kafka_last_error() == RD_KAFKA_RESP_ERR__QUEUE_FULL){  
+                /*如果内部队列满，等待消息传输完成并retry, 
+                内部队列表示要发送的消息和已发送或失败的消息， 
+                内部队列受限于queue.buffering.max.messages配置项*/  
+                rd_kafka_poll(appCtx->rk, 100);  
+                //goto retry;  
+            }     
+        }
+		/* else{  
+            fprintf(stderr, "%% Enqueued message (%zd bytes) for topic %s\n",   
+                len, rd_kafka_topic_name(rkt));  
+        }   */
+  
+        /*producer应用程序应不断地通过以频繁的间隔调用rd_kafka_poll()来为 
+        传送报告队列提供服务。在没有生成消息以确定先前生成的消息已发送了其 
+        发送报告回调函数(和其他注册过的回调函数)期间，要确保rd_kafka_poll() 
+        仍然被调用*/  
+    rd_kafka_poll(appCtx->rk, 0);  
+	 
+   // fprintf(stderr, "%% Flushing final message.. \n");  
+     /*rd_kafka_flush是rd_kafka_poll()的抽象化， 
+     等待所有未完成的produce请求完成，通常在销毁producer实例前完成 
+     以确保所有排列中和正在传输的produce请求在销毁前完成*/  
+    rd_kafka_flush(appCtx->rk, 1);
+  
+     /* Destroy topic object */  
+    /* rd_kafka_topic_destroy(rkt);  
+    
+     /* Destroy the producer instance */  
+    //rd_kafka_destroy(rk);   
+	free(buf);
+    cJSON_Delete(root);
+	
+}
+
 /**
  * Function to process the attached metadata. This is just for demonstration
  * and can be removed if not required.
@@ -1132,7 +1210,7 @@ static void process_meta(AppCtx *appCtx, NvDsBatchMeta *batch_meta) {
     if (!appCtx->config.tiled_display_config.enable || appCtx->config.num_source_sub_bins == 1) {
         appCtx->show_bbox_text = 1;
     }
-
+    cJSON *root = cJSON_CreateArray();
     for (NvDsMetaList *l_frame = batch_meta->frame_meta_list; l_frame != NULL; l_frame = l_frame->next) {
         NvDsFrameMeta *frame_meta = (NvDsFrameMeta *)l_frame->data;
         for (NvDsMetaList *l_obj = frame_meta->obj_meta_list; l_obj != NULL; l_obj = l_obj->next) {
@@ -1140,6 +1218,11 @@ static void process_meta(AppCtx *appCtx, NvDsBatchMeta *batch_meta) {
             gint class_index = obj->class_id;
             NvDsGieConfig *gie_config = NULL;
             gchar *str_ins_pos = NULL;
+			//add box value 
+			float left = obj->rect_params.left;
+			float top = obj->rect_params.top;
+			float right = left + obj->rect_params.width;
+			float bottom = top + obj->rect_params.height;
 
             if (obj->unique_component_id == (gint)appCtx->config.primary_gie_config.unique_id) {
                 gie_config = &appCtx->config.primary_gie_config;
@@ -1205,8 +1288,8 @@ static void process_meta(AppCtx *appCtx, NvDsBatchMeta *batch_meta) {
                 }
             }
 
-            
-         /*    obj->classifier_meta_list = g_list_sort(obj->classifier_meta_list, component_id_compare_func);
+            gchar text[128] = "";
+            obj->classifier_meta_list = g_list_sort(obj->classifier_meta_list, component_id_compare_func);
             for (NvDsMetaList *l_class = obj->classifier_meta_list; l_class != NULL; l_class = l_class->next) {
                 NvDsClassifierMeta *cmeta = (NvDsClassifierMeta *)l_class->data;
                 for (NvDsMetaList *l_label = cmeta->label_info_list; l_label != NULL; l_label = l_label->next) {
@@ -1215,13 +1298,53 @@ static void process_meta(AppCtx *appCtx, NvDsBatchMeta *batch_meta) {
                         sprintf(str_ins_pos, " %s", label->pResult_label);
                     } else if (label->result_label[0] != '\0') {
                         sprintf(str_ins_pos, " %s", label->result_label);
+						sprintf(text, label->result_label);
                     }
                     str_ins_pos += strlen(str_ins_pos);
                 }
-            } */
+            }
+			//添加当下时间
+			  time_t utcCalc ;
+			  struct tm * timeinfo;
+			  time ( &utcCalc );
+			  timeinfo= gmtime(&utcCalc );
+			  timeinfo->tm_hour+=8;
+			  char result[50];
+			  size_t dstSize = strftime(result, 50, "%Y-%m-%d %T", timeinfo);
+
+
+			//添加数组
+			
+			char a[20],b[20],c[20],d[20];
+			sprintf(a,"%.0f",left);//
+			sprintf(b,"%.0f",top);
+			sprintf(c,"%.0f",obj->rect_params.width);
+			sprintf(d,"%.0f",obj->rect_params.height);
+			cJSON *json = cJSON_CreateObject();
+		
+			cJSON *array_2 = NULL;
+		
+			 
+			cJSON_AddItemToObject(json, "Box", array_2=cJSON_CreateObject());
+			cJSON_AddStringToObject(array_2,"leftTopx",a);
+			cJSON_AddStringToObject(array_2,"leftTopy",b);
+			cJSON_AddStringToObject(array_2,"width",c);
+			cJSON_AddStringToObject(array_2,"height",d);
+			// cJSON_AddItemToObject(json,"Event-Time",array=cJSON_CreateArray());
+			cJSON_AddStringToObject(json,"eventTime",result);
+			cJSON_AddStringToObject(json,"type","广告");
+			cJSON_AddStringToObject(json,"objectId",(text));
+			cJSON_AddItemToArray(root,json); 
+			
+			
            
         }
     }
+	if(appCtx->send_flag){
+		char *json_data = NULL;
+		printf("data:%s\n",json_data = cJSON_Print(root));
+		kafka_send(root ,appCtx);
+	}
 }
 
 /**
@@ -1347,49 +1470,33 @@ tiler_src_pad_buffer_probe (GstPad * pad, GstPadProbeInfo * info, gpointer u_dat
 			float left = obj_meta->rect_params.left;
 			float top = obj_meta->rect_params.top;
 			float right = left + obj_meta->rect_params.width;
-		 float bottom = top + obj_meta->rect_params.height;
-		  time_t utcCalc = frame_meta->ntp_timestamp - 2208988800UL ;
-      struct tm * timeinfo;
-      time ( &utcCalc );
-      timeinfo= gmtime(&utcCalc );
-	  timeinfo->tm_hour+=8;
-     
-	  char result[50];
-	  size_t dstSize = strftime(result, 50, "%Y-%m-%d %T", timeinfo);
-      guint frameHeight = frame_meta -> source_frame_height;
-      guint frameWidth = frame_meta -> source_frame_width;
-	  std::vector<gchar> message;
-	  //queue<char> Mess;
+			float bottom = top + obj_meta->rect_params.height;
+			time_t utcCalc = frame_meta->ntp_timestamp - 2208988800UL ;
+			struct tm * timeinfo;
+			time ( &utcCalc );
+			timeinfo= gmtime(&utcCalc );
+			timeinfo->tm_hour+=8;
+		 
+			char result[50];
+			size_t dstSize = strftime(result, 50, "%Y-%m-%d %T", timeinfo);
+			guint frameHeight = frame_meta -> source_frame_height;
+			guint frameWidth = frame_meta -> source_frame_width;
+	 
 	  
-        for (NvDsMetaList * l_class = obj_meta->classifier_meta_list; l_class != NULL; l_class = l_class->next) {
-                NvDsClassifierMeta *cmeta = (NvDsClassifierMeta *) l_class->data;
-				
+			for(NvDsMetaList * l_class = obj_meta->classifier_meta_list; l_class != NULL; l_class = l_class->next) {
+				NvDsClassifierMeta *cmeta = (NvDsClassifierMeta *) l_class->data;
 				
                 for (NvDsMetaList * l_label = cmeta->label_info_list; l_label != NULL; l_label = l_label->next) {
                     NvDsLabelInfo *label = (NvDsLabelInfo *) l_label->data;
                     class_id = label->result_class_id;
-					
-					
-					
-                   //model_prob = label->result_prob;
-				   //NvDsLabelInfo *label_info =
-                  //nvds_acquire_label_info_meta_from_pool (batch_meta);
-			            //label->result_class_id =ind ;
-					  // label->result_prob = 0.5;
                     if (label->result_label[0] != '\0' ){ 
                       // g_print("class:%s\n", label->result_label);
                        
 						// strcpy (label->result_label,
                           //   label->class_id ); */
 						sprintf(text, label->result_label);
-                        
-						//message.push_back(label->result_label.c_str());
-						//index_count++;
-						//std::cout<<index_count<<std::endl;
                     }
                 }
-				//write_kitti_kafka_output();
-				
             }
 		//printf("re: %s\n", text);
 		char a[20],b[20],c[20],d[20];
@@ -1405,10 +1512,6 @@ tiler_src_pad_buffer_probe (GstPad * pad, GstPadProbeInfo * info, gpointer u_dat
 		//cJSON_AddNumberToObject(json,"eventTime",0);
 		cJSON_AddNumberToObject(json,"数据源—流id",0);
 		cJSON_AddItemToObject(json, "Box", array_2=cJSON_CreateObject());
-		
-		 //cJSON_AddStringToObject(array_2,"left","xiaohui");
-		/*  cJSON_AddItemToObject(array_2,"left",cJSON_CreateString("1"));
-		 cJSON_AddItemToObject(array_2,"address",cJSON_CreateString("HK")); */
         
 		cJSON_AddStringToObject(array_2,"leftTopx",a);
 		cJSON_AddStringToObject(array_2,"leftTopy",b);
@@ -1425,17 +1528,11 @@ tiler_src_pad_buffer_probe (GstPad * pad, GstPadProbeInfo * info, gpointer u_dat
 		cJSON_AddStringToObject(json, "objectId", text);
 	
 		cJSON_AddItemToArray(root,json); 
-		
 	
-       
-  
+	}
 }
-}
-
-
 	char *json_data = NULL;
     //printf("data:%s\n",json_data = cJSON_Print(root));
-	
 	char *buf = cJSON_PrintUnformatted(root);
     size_t len = strlen(buf);
     //std::cout<<"检查数量："<<index_count<<std::endl;
@@ -1448,12 +1545,7 @@ if(len == 0){
             第二个参数是最大阻塞时间，如果设为0，将会是非阻塞的调用*/
      		rd_kafka_poll(appCtx->rk, 0);
     }
-         /*Send/Produce message.
-           这是一个异步调用，在成功的情况下，只会将消息排入内部producer队列，
-           对broker的实际传递尝试由后台线程处理，之前注册的传递回调函数(dr_msg_cb)
-           用于在消息传递成功或失败时向应用程序发回信号*/
-	//std::cout<<"x000000000000000000011111111"<<std::endl;
- 	
+
    if (rd_kafka_produce(
                     /* Topic object */
      				appCtx->rkt,
@@ -1480,22 +1572,9 @@ if(len == 0){
 			}	
 	}
  
- 
-
-	/* else{
-     		fprintf(stderr, "%% Enqueued success message (%zd bytes) for topic %s\n", 
-     			len, rd_kafka_topic_name(appCtx->rkt));
-     	} */
-	
-        /*producer应用程序应不断地通过以频繁的间隔调用rd_kafka_poll()来为
-        传送报告队列提供服务。在没有生成消息以确定先前生成的消息已发送了其
-        发送报告回调函数(和其他注册json过的回调函数)期间，要确保rd_kafka_poll()
-        仍然被调用*/
     rd_kafka_poll(appCtx->rk, 0);
      //fprintf(stderr, "%% Flushing final message.. \n");
-     /*rd_kafka_flush是rd_kafka_poll()的抽象化，
-     等待所有未完成的produce请求完成，通常在销毁producer实例前完成
-     以确保所有排列中和正在传输的produce请求在销毁前完成*/
+
     rd_kafka_flush(appCtx->rk, 10*1000);
      //将JSON结构所占用的数据空间释放
 	free(json_data);
@@ -1562,17 +1641,17 @@ static void get_sgie_tensor_output(AppCtx *appCtx, NvDsBatchMeta *batch_meta) {
 							 std::cout<<"#%%%%%%%%%%%%%%%%%%%%%"<<outputBBoxLayerIndex<<std::endl;
         }
 	} */     
-       	NvDsInferDimsCHW outputBBoxDims;
-	//NvDsInferDimsNCHW  out;
-	getDimsCHWFromDims(outputBBoxDims,
-                       tensor_meta->output_layers_info[0].dims);
+						NvDsInferDimsCHW outputBBoxDims;
+					//NvDsInferDimsNCHW  out;
+					getDimsCHWFromDims(outputBBoxDims,
+									   tensor_meta->output_layers_info[0].dims);
 
-	
-	//std::vector<std::string> * file_to_vector=InputData_To_Vector();
-	std::cout<<"c:"<<outputBBoxDims.c<<std::endl;  //OUTPUT_W
-	
-	std::cout<<"height!:"<<outputBBoxDims.h<<std::endl;
-	 std::cout<<"W:"<<outputBBoxDims.w<<std::endl;  //OUTPUT_W
+					
+					//std::vector<std::string> * file_to_vector=InputData_To_Vector();
+					std::cout<<"c:"<<outputBBoxDims.c<<std::endl;  //OUTPUT_W
+					
+					std::cout<<"height!:"<<outputBBoxDims.h<<std::endl;
+					 std::cout<<"W:"<<outputBBoxDims.w<<std::endl;  //OUTPUT_W
     
                    // float *outputCoverageBuffer = (float *)tensor_meta->output_layers_info[0].buffer;
                    float *outputCoverageBuffer = (float *)tensor_meta->out_buf_ptrs_host[0];
@@ -1931,13 +2010,14 @@ create_processing_instance (AppCtx * appCtx, guint index)
 //g_print("xxxxxxxxxxxxxxxxxxxxxxxx2333333333321\n");
   NVGSTDS_BIN_ADD_GHOST_PAD (instance_bin->bin, last_elem, "sink");
   if (config->osd_config.enable) {
-	// g_print("xxxxxxxxxxxxxxxxxxxxxxxx2222222222221\n");
+	 g_print("xxxxxxxxxxxxxxxxxxxxxxxx2222222222221\n");
     NVGSTDS_ELEM_ADD_PROBE (instance_bin->all_bbox_buffer_probe_id,
         instance_bin->osd_bin.nvosd, "sink",
         gie_processing_done_buf_prob, GST_PAD_PROBE_TYPE_BUFFER, instance_bin);
-		NVGSTDS_ELEM_ADD_PROBE (instance_bin->all_bbox_buffer_probe_id,
+		
+	/* NVGSTDS_ELEM_ADD_PROBE (instance_bin->all_bbox_buffer_probe_id,
         instance_bin->osd_bin.nvosd, "sink",
-        tiler_src_pad_buffer_probe, GST_PAD_PROBE_TYPE_BUFFER, instance_bin);
+        tiler_src_pad_buffer_probe, GST_PAD_PROBE_TYPE_BUFFER, instance_bin); */
   } else {
 	  
     NVGSTDS_ELEM_ADD_PROBE (instance_bin->all_bbox_buffer_probe_id,

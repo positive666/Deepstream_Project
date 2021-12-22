@@ -667,15 +667,15 @@ main (int argc, char *argv[])
     is.close();
     is.clear();
     g_print("[INFO] Reading key from file...\n");
-   
-    std::string kafka_message=(config["kafka_message"]);
-	std::string kafka_topic=(config["kafka_topic"]);
+    bool send_flag=config["send_flag"];
+    std::string kafka_message=config["kafka_message"];
+	std::string kafka_topic=config["kafka_topic"];
 
-    int outputDim = config["rec_outputDim"];
+    //int outputDim = config["rec_outputDim"];
     
   
 	
-    int maxFacesPerScene = config["det_maxFacesPerScene"]; 
+    //int maxFacesPerScene = config["det_maxFacesPerScene"]; 
 	
 	GOptionContext *ctx = NULL;
 	GOptionGroup *group = NULL;
@@ -745,18 +745,20 @@ main (int argc, char *argv[])
       appCtx[i]->return_value = -1;
       goto done;
     }
-       // Init context 
+       
        // Init context 
      
-    appCtx[i]->sgieOutputDim = outputDim;
-    appCtx[i]->rec_output_W=config["rec_output_W"];
-    appCtx[i]->Dict=get_dict(config["input_Dict"]);
-    std::cout<<"check dice size:"<<appCtx[i]->Dict.size()<<std::endl;
+    //appCtx[i]->sgieOutputDim = outputDim;
+   // appCtx[i]->rec_output_W=config["rec_output_W"];
+    //appCtx[i]->Dict=get_dict(config["input_Dict"]);
+   // std::cout<<"check dice size:"<<appCtx[i]->Dict.size()<<std::endl;
+   
 	// Init Global Kafka	  
 	char errstr[512];       
     appCtx[i]->brokers = kafka_message.c_str();
     appCtx[i]->topic = kafka_topic.c_str();
 	appCtx[i]->conf = rd_kafka_conf_new();
+	appCtx[i]->send_flag= send_flag;
 	if (rd_kafka_conf_set(appCtx[i]->conf, "bootstrap.servers", appCtx[i]->brokers, errstr,
 					sizeof(errstr)) != RD_KAFKA_CONF_OK){
 			fprintf(stderr, "%s\n", errstr);
