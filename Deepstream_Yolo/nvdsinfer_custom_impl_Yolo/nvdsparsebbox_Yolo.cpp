@@ -21,16 +21,185 @@
  */
 
 #include <algorithm>
+#include <dlfcn.h>
 #include <cassert>
 #include <cmath>
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <unistd.h>
 #include <unordered_map>
 #include "nvdsinfer_custom_impl.h"
 #include "trt_utils.h"
+#include <map>
+#include <string>
+#include <vector>
+#include "nvmsgbroker.h"
+#include<thread>
+#include "rdkafkacpp.h"
+#include <csignal>
+#define SO_PATH "/opt/nvidia/deepstream/deepstream/lib/"
 
+/* #define KAFKA_KEY "kafka"
+#define KAFKA_PROTO_SO "libnvds_kafka_proto.so"
+#define KAFKA_PROTO_PATH SO_PATH KAFKA_PROTO_SO
+#define KAFKA_CFG_FILE "./cfg_kafka.txt"
+#define KAFKA_CONN_STR "localhost;9092" // broker;port
+#define KAFKA_TPOIC "qucikstart-events"
+#include <jsoncpp/json/json.h> */
+#include <fstream>
 
+static bool run = true;
+static void sigterm (int sig) {
+    run = false;
+}
+
+/* class ExampleDeliveryReportCb : public RdKafka::DeliveryReportCb {
+public:
+    void dr_cb (RdKafka::Message &message) {
+        std::cout << "Message delivery for (" << message.len() << " bytes): " <<
+                     message.errstr() << std::endl;
+        if (message.key())
+            std::cout << "Key: " << *(message.key()) << ";" << std::endl;
+    }
+}; */
+
+/* class ExampleEventCb : public RdKafka::EventCb {
+public:
+    void event_cb (RdKafka::Event &event) {
+        switch (event.type())
+        {
+        case RdKafka::Event::EVENT_ERROR:
+            std::cerr << "ERROR (" << RdKafka::err2str(event.err()) << "): " <<
+                         event.str() << std::endl;
+            if (event.err() == RdKafka::ERR__ALL_BROKERS_DOWN)
+                run = false;
+            break;
+
+        case RdKafka::Event::EVENT_STATS:
+            std::cerr << "\"STATS\": " << event.str() << std::endl;
+            break;
+
+        case RdKafka::Event::EVENT_LOG:
+            fprintf(stderr, "LOG-%i-%s: %s\n",
+                    event.severity(), event.fac().c_str(), event.str().c_str());
+            break;
+
+        default:
+            std::cerr << "EVENT " << event.type() <<
+                         " (" << RdKafka::err2str(event.err()) << "): " <<
+                         event.str() << std::endl;
+            break;
+        }
+    }
+}; */
+
+/* void libkafka(std::vector<NvDsInferParseObjectInfo>& objectList)
+{  
+    Json::Value json_temp;
+	int count=0;
+	//Json::Value Te;
+	Json::Value local;
+	//Json::Value event_time;
+	//Json::Value E_time;
+	Json::Value BBox;
+	
+    //json_temp["位置"] = Json::Value();
+	//std::vector<string> Root;
+	Json::Value root; 
+	//std::cout<<"obj size:"<<obj.size()<<std::endl;
+	for(auto& pop : objectList){
+		
+		json_temp["广告"]=Json::Value("1");
+		local["left"]=(pop.left);
+		local["top"]=(pop.top);
+		local["width"]=(pop.width);
+		local["height"]=(pop.height);
+		BBox["EventTime"]="触发时间";
+		BBox["type"]=json_temp;
+		BBox["box"]=(local);
+		BBox["目标id"]=count++;
+		root.append(BBox);
+	}
+  
+    std::string out = root.toStyledString();
+	//std::cout<<writer.write(root)<<std::endl;
+	const char*SEND_MSG=(out.c_str());
+	std::string brokers = "localhost:9092";
+    std::string errstr;
+    std::string topic_str="yolov5";
+    int32_t partition = RdKafka::Topic::PARTITION_UA;
+
+    RdKafka::Conf *conf = RdKafka::Conf::create(RdKafka::Conf::CONF_GLOBAL);
+    RdKafka::Conf *tconf = RdKafka::Conf::create(RdKafka::Conf::CONF_TOPIC);
+  
+    conf->set("bootstrap.servers", brokers, errstr);
+    std::cout<<"xxxxxxxxxxxxxxxx:"<<errstr<<std::endl;
+    ExampleEventCb ex_event_cb;
+    conf->set("event_cb", &ex_event_cb, errstr);
+
+    signal(SIGINT, sigterm);
+    signal(SIGTERM, sigterm);
+
+    ExampleDeliveryReportCb ex_dr_cb;
+    conf->set("dr_cb", &ex_dr_cb, errstr);
+
+    RdKafka::Producer *producer = RdKafka::Producer::create(conf, errstr);
+    if (!producer) {
+        std::cerr << "Failed to create producer: " << errstr << std::endl;
+        exit(1);
+    }
+    std::cout << "% Created producer " << producer->name() << std::endl;
+
+    RdKafka::Topic *topic = RdKafka::Topic::create(producer, topic_str,
+                                                   tconf, errstr);
+    if (!topic) {
+        std::cerr << "Failed to create topic: " << errstr << std::endl;
+        exit(1);
+    }
+
+   // for (std::string line; run && std::getline(std::cin, line);) {
+        if (objectList.empty()) {
+            producer->poll(0);
+            //continue;
+        }
+
+        RdKafka::ErrorCode resp =
+                producer->produce(topic, partition,
+                                  RdKafka::Producer::RK_MSG_COPY ,
+                                  const_cast<char *>(SEND_MSG), strlen(SEND_MSG),
+                                  NULL, NULL);
+								  std::cerr << "% Produced message :" <<SEND_MSG<<std::endl;
+        if (resp != RdKafka::ERR_NO_ERROR)
+            std::cerr << "% Produce failed: " <<
+                         RdKafka::err2str(resp) << std::endl;
+        else
+            std::cerr << "% Produced message " <<
+                         std::endl;
+
+        producer->poll(0);
+   // }
+    
+    run = true;
+   // 退出前处理完输出队列中的消息
+    while (run && producer->outq_len() > 0) {
+        std::cerr << "Waiting for " << producer->outq_len() << std::endl;
+        producer->poll(100);
+    }
+
+    delete conf;
+    delete tconf;
+    delete topic;
+    delete producer;
+
+    RdKafka::wait_destroyed(1000);
+
+	
+	
+	
+	
+	
+} */
 extern "C" bool NvDsInferParseCustomYoloV5(
     std::vector<NvDsInferLayerInfo> const &outputLayersInfo,
     NvDsInferNetworkInfo const &networkInfo,
@@ -66,9 +235,9 @@ extern "C" bool NvDsInferParseCustomYoloTLT(
     NvDsInferParseDetectionParams const& detectionParams,
     std::vector<NvDsInferParseObjectInfo>& objectList);
 	
-static const int NUM_CLASSES_YOLO = 80;
-#define NMS_THRESH 0.5
-#define CONF_THRESH 0.4
+static const int NUM_CLASSES_YOLO = 15;
+#define NMS_THRESH 0.4
+#define CONF_THRESH 0.35
 #define BATCH_SIZE 1
 
 //ADD
@@ -80,6 +249,229 @@ struct alignas(float) Detection{
         float conf;  // bbox_conf * cls_conf
         float class_id;
     };
+
+std::vector<std::string> m_classes;
+
+/* struct test_info
+{
+    int test_id;
+    char *test_key;
+    char *proto_key;
+    char *proto_path;
+    char *cfg_file;
+    char *conn_str;
+    int cb_count;
+    int consumed_count;
+
+    test_info() {}
+    test_info(int id, const char* test_key, const char* proto_key, const char* proto_path, const char* cfg_file, const char* conn_str)
+    {
+        load_info(id, test_key, proto_key, proto_path, cfg_file, conn_str);
+    }
+    test_info(const test_info& tmp){
+		this->test_id = tmp.test_id;
+        this->test_key = strdup(tmp.test_key);
+        this->proto_key = strdup(tmp.proto_key);
+        this->proto_path = strdup(tmp.proto_path);
+        this->cfg_file = (tmp.cfg_file != nullptr) ? strdup(tmp.cfg_file) : nullptr;
+        this->conn_str = (tmp.conn_str != nullptr) ? strdup(tmp.conn_str) : nullptr;
+        this->cb_count = 0;
+        this->consumed_count = 0;
+	}
+    void load_info(int id, const char* test_key, const char* proto_key, const char* proto_path, const char* cfg_file, const char* conn_str)
+    {
+        this->test_id = id;
+        this->test_key = strdup(test_key);
+        this->proto_key = strdup(proto_key);
+        this->proto_path = strdup(proto_path);
+        this->cfg_file = (cfg_file != nullptr) ? strdup(cfg_file) : nullptr;
+        this->conn_str = (conn_str != nullptr) ? strdup(conn_str) : nullptr;
+        this->cb_count = 0;
+        this->consumed_count = 0;
+    }
+
+    ~test_info()
+    {  //if (test_key != nullptr)
+        free(test_key);
+	//if (proto_key != nullptr)
+        free(proto_key);
+	//if (proto_path != nullptr)
+        free(proto_path);
+        if (cfg_file != nullptr)
+            free(cfg_file);
+        if (conn_str != nullptr)
+            free(conn_str);
+    }
+}; */
+ 
+ 
+ 
+/* std::map<char*, test_info> g_info_map;   
+
+void test_connect_cb(NvMsgBrokerClientHandle h_ptr, NvMsgBrokerErrorType status)
+{
+    if (status == NV_MSGBROKER_API_OK)
+        printf("Connect succeeded\n");
+    else{
+        printf("Connect failed\n");		
+	}
+}
+
+void test_send_cb(void *user_ptr,  NvMsgBrokerErrorType flag)
+{
+    int count = -1;
+    int id = -1;
+    char *key = (char*)user_ptr;
+    std::map<char*, test_info>::iterator iter = g_info_map.find(key);
+    if (iter != g_info_map.end()) {
+        test_info &ti = iter->second;
+        count = ++ti.cb_count;
+        id = ti.test_id;
+    } else {
+        printf("test_send_cb: Failed to find test info for %s\n", key);
+    }
+
+    if (flag == NV_MSGBROKER_API_OK)
+        printf("Test %d: async send[%d] succeeded for %s\n", id, count, key);
+    else
+        printf("Test %d: async send[%d] failed for %s\n", id, count, key);
+}
+
+void test_subscribe_cb(NvMsgBrokerErrorType flag, void *msg, int msglen, char *topic, void *user_ptr)
+{
+    int count = -1;
+    int id = -1;
+    char *key = (char*)user_ptr;
+    std::map<char*, test_info>::iterator iter = g_info_map.find(key);
+    if (iter != g_info_map.end()) {
+        test_info &ti = iter->second;
+        count = ++ti.consumed_count;
+        id = ti.test_id;
+    } else {
+        printf("subscribe_cb: Failed to find test info for %s\n", key);
+    }
+
+    if(flag == NV_MSGBROKER_API_ERR) {
+        printf("Test %d: Error in consuming message[%d] from broker\n", id, count);
+    }
+    else {
+        printf("Test %d: Consuming message[%d], on topic[%s]. Payload= %.*s\n", id, count, topic, msglen, (const char *) msg);
+    }
+} */
+  
+/* int  run_test(char *test_key,std::vector<NvDsInferParseObjectInfo>obj )
+{   	
+    //加载类别
+    
+  
+	
+   // test_info kafka_test(test_id, KAFKA_KEY, KAFKA_KEY, MOATA, KAFKA_CFG_FILE, KAFKA_CONN_STR);
+    // To disable a test, comment out the line below that adds it to g_info_map.
+    //g_info_map[kafka_test.test_key] = kafka_test;
+//	for (auto it = g_info_map.begin(); it != g_info_map.end(); ++it) {
+	 
+    
+    std::cout<<"run test!!!"<<std::endl;
+	 //char *test_key=it->first;
+  for (auto iter = g_info_map.begin(); iter != g_info_map.end(); ++iter) 
+        //printf("Starting %s: %s\n", iter->second.test_key, iter->second.proto_key);
+		std::cout<<"AFTERRRRRRRRRRRRRRRR:"<<iter->first<<" "<<iter->second.proto_key<<std::endl;
+   // std::cout<<"开始处理kafka消息！"<<g_info_map.find(test_key)<<std::endl;
+	//std::cout<<""<<std::endl;d
+    std::map<char*, test_info>::iterator iter = g_info_map.find(test_key);
+	//std::cout<<"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa："<<g_info_map.size()<<std::endl;
+    if (iter == g_info_map.end()) {
+        printf("Failed to find test info for %s\n", test_key);
+        return -1;
+    } 
+	int count=0;
+	//g_info_map.clear();
+	test_info &ti=iter->second;
+	//g_info_map.erase(iter);
+    NvMsgBrokerClientHandle conn_handle;
+	std::cout<<"1:"<<g_info_map.find(test_key)->second.proto_path<<std::endl;
+	std::cout<<"2:"<<g_info_map.find(test_key)->second.conn_str<<std::endl;
+	std::cout<<"3:"<<g_info_map.find(test_key)->second.cfg_file<<std::endl;
+	
+	conn_handle = nv_msgbroker_connect(ti.conn_str, ti.proto_path, test_connect_cb, ti.cfg_file); 
+	std::cout<<"状态"<<conn_handle<<std::endl;
+    if (!conn_handle) {
+         printf("Test %d: Connect failed for %s [%s:%s].\n", ti.test_id, ti.conn_str, ti.test_key, ti.proto_key);
+		// g_info_map.erase(test_key);
+         return -1;
+    }
+    
+    //Subscribe to topics
+    const char *topics[] = {KAFKA_TPOIC};
+    int num_topics=1;
+    NvMsgBrokerErrorType ret = nv_msgbroker_subscribe(conn_handle, (char **)topics, num_topics, test_subscribe_cb, ti.test_key);
+    switch (ret) {
+        case NV_MSGBROKER_API_ERR:
+             printf("Test %d: Subscription to topic[s] failed for %s(%s)\n", ti.test_id, ti.test_key, ti.proto_key);
+             return -1;
+        case NV_MSGBROKER_API_NOT_SUPPORTED:
+             printf("Test %d: Subscription not supported for %s(%s). Skipping subscription.\n", ti.test_id, ti.test_key, ti.proto_key);
+             break;
+     }
+ 
+   
+	Json::Value json_temp;
+	//Json::Value Te;
+	Json::Value local;
+	//Json::Value event_time;
+	//Json::Value E_time;
+	Json::Value BBox;
+	Json::FastWriter writer;
+	
+    //json_temp["位置"] = Json::Value();
+	//std::vector<string> Root;
+	Json::Value root; 
+	std::cout<<"obj size:"<<obj.size()<<std::endl;
+	for(auto& pop : obj){
+		
+		json_temp["广告"]=Json::Value("1");
+		local["left"]=(pop.left);
+		local["top"]=(pop.top);
+		local["width"]=(pop.width);
+		local["height"]=(pop.height);
+		BBox["EventTime"]="触发时间";
+		BBox["type"]=json_temp;
+		BBox["box"]=(local);
+		BBox["目标id"]=count++;
+		root.append(BBox);
+	}
+  
+    std::string out = root.toStyledString();
+	//std::cout<<writer.write(root)<<std::endl;
+	const char*SEND_MSG=(out.c_str());
+    std::cout << "message :"<<SEND_MSG << std::endl;
+	 
+   
+    NvMsgBrokerClientMsg msg;
+    msg.topic = strdup(KAFKA_TPOIC);
+    msg.payload = const_cast<char *>(SEND_MSG);
+    msg.payload_len = strlen(SEND_MSG);
+    for(int i = 0; i < 1; i++) {
+      if (nv_msgbroker_send_async(conn_handle, msg, test_send_cb, ti.test_key) != NV_MSGBROKER_API_OK)
+	    printf("Test %d: send [%d] failed for %s(%s)\n", ti.test_id, i, ti.test_key, ti.proto_key);
+      else{
+	    printf("Test %d: sending [%d] asynchronously for %s(%s)\n", ti.test_id, i, ti.test_key, ti.proto_key);
+    // unsleep(100);  
+	 }  //10ms sleep
+   }
+      free(msg.topic);
+	 
+     
+     //printf("Test %d: Disconnecting... in 3 secs\n", ti.test_id);
+   // sleep(3);
+	 //m_classes.clear();
+ //}
+	
+	nv_msgbroker_disconnect(conn_handle);
+	//}
+	//m_classes.clear();
+} */
+
 
 float iou(float lbox[4], float rbox[4]) {
     float interBox[] = {
@@ -127,9 +519,12 @@ void nms(std::vector<Detection>& res, float *output, float conf_thresh, float nm
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+int test_id=0;
 
+	
+	/* test_info kafka_test(test_id++, KAFKA_KEY, KAFKA_KEY, KAFKA_PROTO_PATH, KAFKA_CFG_FILE, KAFKA_CONN_STR); */
 /* This is a sample bounding box parsing function for the sample YoloV5m detector model */
-static bool NvDsInferParseYoloV5(
+extern "C"  bool NvDsInferParseYoloV5(
     std::vector<NvDsInferLayerInfo> const& outputLayersInfo,
     NvDsInferNetworkInfo const& networkInfo,
     NvDsInferParseDetectionParams const& detectionParams,
@@ -143,10 +538,12 @@ static bool NvDsInferParseYoloV5(
     }
 
     std::vector<Detection> res;
-
+    
     nms(res, (float*)(outputLayersInfo[0].buffer), CONF_THRESH, NMS_THRESH);
     //std::cout<<"Nms done sucessfully----"<<std::endl;
+	//std::cerr<<KAFKA_CFG_FILE<<KAFKA_CFG_FILE<<"....."<<KAFKA_CONN_STR<<std::endl;
     
+    //printf("Refer to nvds log file for log output\n");
     for(auto& r : res) {
 	    NvDsInferParseObjectInfo oinfo;        
         
@@ -156,11 +553,61 @@ static bool NvDsInferParseYoloV5(
 	    oinfo.width   = static_cast<unsigned int>(r.bbox[2]);
 	    oinfo.height  = static_cast<unsigned int>(r.bbox[3]);
 	    oinfo.detectionConfidence = r.conf;
-        //std::cout << static_cast<unsigned int>(r.bbox[0]) << "," << static_cast<unsigned int>(r.bbox[1]) << "," << static_cast<unsigned int>(r.bbox[2]) << "," 
-        //          << static_cast<unsigned int>(r.bbox[3]) << "," << static_cast<unsigned int>(r.class_id) << "," << static_cast<unsigned int>(r.conf) << std::endl;
-	    objectList.push_back(oinfo);        
+	
+       /*  std::cout << static_cast<unsigned int>(r.bbox[0]) << "," << static_cast<unsigned int>(r.bbox[1]) << "," << static_cast<unsigned int>(r.bbox[2]) << "," 
+                  << static_cast<unsigned int>(r.bbox[3]) << "," << static_cast<unsigned int>(r.class_id) << "," << static_cast<unsigned int>(r.conf) << std::endl; */
+	    
+		objectList.push_back(oinfo);
+	
+        ///auto iter = g_info_map.begin();
+        //printf("Starting %s: %s\n", iter->second.test_key, iter->second.proto_key);
+				//std::thread(run_test, iter->first, pop).join();
+				//run_test(iter->first ,oinfo);
+		//std::cout<<"检测容量："<<g_info_map<<std::endl;
+		//std::cout<<m_classes.size()<<std::endl;
+		// for (auto iter = g_info_map.begin(); iter != g_info_map.end(); ++iter) {
+         // printf("Starting %s: %s\n", iter->second.test_key, iter->second.proto_key);
+    //} 
+    //} 
     }
-    
+	
+	
+	
+	//std::cout<<"进行一次推理！"<<objectList.size()<<std::endl;
+	//test_info tt{kafka_test};
+	//g_info_map[kafka_test.test_key] = tt;
+	// if(!objectList.empty()){
+		 
+        /* std::string classesFile = "/home/project/Deepstream_Project/Deepstream_Yolo/lables_ads.txt";
+	     std::ifstream ifs(classesFile.c_str());
+	     std::string line; */
+	   /*   while (getline(ifs, line))
+         m_classes.push_back(line); */
+	
+	    
+        // To disable a test, comment out the line below that adds it to g_info_map.
+        
+		std::cout<<"检测到目标 "<<std::endl;
+	 //for (auto iter = g_info_map.begin(); iter != g_info_map.end(); ++iter) {
+		//std::cout<<kafka_test<<std::endl;
+       /*  if(!objectList.empty())	   
+			libkafka(objectList); */
+        //printf("Starting %s: %s\n", iter->second.test_key, iter->second.proto_key);
+	    // printf("Starting %s: %s\n",iter->second); 
+     /*   for (auto iter = g_info_map.begin(); iter != g_info_map.end(); ++iter) {
+        //printf("Starting %s: %s\n", iter->second.test_key, iter->second.proto_key);
+		std::cout<<"BEFORE:"<<iter->first<<" "<<iter->second.proto_key<<std::endl;
+        std::thread(run_test, iter->first,objectList).join();
+	
+       // break;
+    }  */
+//	 }
+	// }
+	    
+    //}  
+	//g_info_map.clear();
+	//g_info_map.clear();
+   // printf("Done. All tests finished successfully\n");
     return true;
 }
 /* This is a sample bounding box parsing function for the sample YoloV4 detector model */
@@ -424,6 +871,7 @@ extern "C" bool NvDsInferParseCustomYoloV4(
     NvDsInferParseDetectionParams const &detectionParams,
     std::vector<NvDsInferParseObjectInfo> &objectList)
 {
+	
     return NvDsInferParseYoloV4 (
         outputLayersInfo, networkInfo, detectionParams, objectList);
 }
@@ -578,9 +1026,9 @@ extern "C" bool NvDsInferParseCustomYoloTLT(
 
 /* Check that the custom function has been defined correctly */
 CHECK_CUSTOM_PARSE_FUNC_PROTOTYPE(NvDsInferParseCustomYoloV5);
-CHECK_CUSTOM_PARSE_FUNC_PROTOTYPE(NvDsInferParseCustomYoloV4);
-CHECK_CUSTOM_PARSE_FUNC_PROTOTYPE(NvDsInferParseCustomYoloV3);
-CHECK_CUSTOM_PARSE_FUNC_PROTOTYPE(NvDsInferParseCustomYoloV3Tiny);
-CHECK_CUSTOM_PARSE_FUNC_PROTOTYPE(NvDsInferParseCustomYoloV2);
-CHECK_CUSTOM_PARSE_FUNC_PROTOTYPE(NvDsInferParseCustomYoloV2Tiny);
-CHECK_CUSTOM_PARSE_FUNC_PROTOTYPE(NvDsInferParseCustomYoloTLT);
+//CHECK_CUSTOM_PARSE_FUNC_PROTOTYPE(NvDsInferParseCustomYoloV4);
+//CHECK_CUSTOM_PARSE_FUNC_PROTOTYPE(NvDsInferParseCustomYoloV3);
+//CHECK_CUSTOM_PARSE_FUNC_PROTOTYPE(NvDsInferParseCustomYoloV3Tiny);
+//CHECK_CUSTOM_PARSE_FUNC_PROTOTYPE(NvDsInferParseCustomYoloV2);
+//CHECK_CUSTOM_PARSE_FUNC_PROTOTYPE(NvDsInferParseCustomYoloV2Tiny);
+//CHECK_CUSTOM_PARSE_FUNC_PROTOTYPE(NvDsInferParseCustomYoloTLT);
