@@ -20,7 +20,7 @@
 # DEALINGS IN THE SOFTWARE.
 ################################################################################
 
-CUDA_VER?=10.2
+CUDA_VER?=11.1
 ifeq ($(CUDA_VER),)
   $(error "CUDA_VER is not set")
 endif
@@ -28,10 +28,11 @@ CC:= g++
 NVCC:=/usr/local/cuda-$(CUDA_VER)/bin/nvcc
 
 CFLAGS:= -Wall -std=c++11 -shared -fPIC -Wno-error=deprecated-declarations
-CFLAGS+= -I../includes -I/usr/local/cuda-$(CUDA_VER)/include
-
-LIBS:= -L/usr/local/cuda-10.2/lib64 -L/usr/lib/x86_64-linux-gnu -L/opt/nvidia/deepstream/deepstream-5.0/lib/ -lnvinfer_plugin -lnvinfer -lnvparsers -L/usr/local/cuda-$(CUDA_VER)/lib64 -lcudart -lcublas -lstdc++fs 
-LFLAGS:= -shared -Wl,--start-group $(LIBS) -Wl,--end-group
+CFLAGS+= -I/opt/nvidia/deepstream/deepstream-5.1/sources/includes/ -I/usr/local/cuda-$(CUDA_VER)/include  -I/usr/local/include/librdkafka
+#CFLAGS+=-I../../includes -I/home/dell/Pictures/TensorRT-7.0.0.11/include
+#CFLAGS+=-I../../includes -I/opt/nvidia/deepstream/deepstream-5.0/sources/includes
+LIBS:= -L/usr/local/cuda-11.1/lib64 -L/usr/lib/x86_64-linux-gnu -L/opt/nvidia/deepstream/deepstream-5.1/lib/ -lnvinfer_plugin -lnvinfer -lnvparsers -L/usr/local/cuda-$(CUDA_VER)/lib64 -lcudart -lcublas -lstdc++fs  -ljsoncpp -lrdkafka -lrdkafka++
+LFLAGS:= -shared -Wl,--start-group $(LIBS) -Wl,--end-group   
 
 INCS:= $(wildcard *.h)
 SRCFILES:= nvdsinfer_yolo_engine.cpp \
@@ -39,6 +40,7 @@ SRCFILES:= nvdsinfer_yolo_engine.cpp \
            yoloPlugins.cpp    \
            trt_utils.cpp              \
            yolo.cpp              \
+           yololayer.cu    \
            kernels.cu
 TARGET_LIB:= libnvdsinfer_custom_impl_Yolo.so
 
