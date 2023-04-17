@@ -1,7 +1,7 @@
 ################################################################################
 ### Copyright (c) 2021, positive666.  All rights reserved.
 ################################################################################
-# 0.Instruction
+# 0.Instruction(coming soon update )
 This repository includes Yolo series project implementation based on Deepstream.
 build your own Deepstream project and help you familiarize yourself with the process, you can deploy any inference model!!
 including yolov5, yolov4, and And some model deployment projects such as OCR project based on yolo-ob detection and more  will be added later.  
